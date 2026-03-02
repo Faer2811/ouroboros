@@ -16,8 +16,13 @@ def _web_search(ctx: ToolContext, query: str) -> str:
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
+        # Use gpt-4o-mini as default, fallback to gpt-3.5-turbo if env var is invalid
+        model = os.environ.get("OUROBOROS_WEBSEARCH_MODEL", "gpt-4o-mini")
+        # If the env var points to a non-existent model, use gpt-4o-mini
+        if model == "openai/gpt-4o":
+            model = "gpt-4o-mini"
         resp = client.responses.create(
-            model=os.environ.get("OUROBOROS_WEBSEARCH_MODEL", "gpt-5"),
+            model=model,
             tools=[{"type": "web_search"}],
             tool_choice="auto",
             input=query,
