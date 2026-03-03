@@ -39,8 +39,6 @@ log = logging.getLogger(__name__)
 class BackgroundConsciousness:
     """Persistent background thinking loop for Ouroboros."""
 
-    _MAX_BG_ROUNDS = 5
-
     def __init__(
         self,
         drive_root: pathlib.Path,
@@ -63,6 +61,11 @@ class BackgroundConsciousness:
         self._next_wakeup_sec: float = 300.0
         self._observations: queue.Queue = queue.Queue()
         self._deferred_events: list = []
+
+        # Round limits for thinking cycles (dynamic — LLM can extend via request_more_rounds)
+        self._base_max_rounds: int = 3       # conservative default; reset at each think cycle
+        self._current_max_rounds: int = 3    # may grow within a cycle on LLM request
+        self._absolute_max_rounds: int = 15  # hard safety ceiling; never exceeded
 
         # Budget tracking
         self._bg_spent_usd: float = 0.0
@@ -174,24 +177,34 @@ class BackgroundConsciousness:
 
     def _think(self) -> None:
         """One thinking cycle: build context, call LLM, execute tools iteratively."""
-        context = self._build_context()
-        model = self._model
+        # Reset dynamic round limit to the conservative base for this cycle.
+        # The LLM may raise it mid-cycle via request_more_rounds (up to _absolute_max_rounds).
+        self._current_max_rounds = self._base_max_rounds
 
+        model = self._model
         tools = self._tool_schemas()
         messages = [
-            {"role": "system", "content": context},
+            {"role": "system", "content": self._build_context(round_idx=1)},
             {"role": "user", "content": "Wake up. Think."},
         ]
 
         total_cost = 0.0
         final_content = ""
-        round_idx = 0
+        round_idx = 1
         all_pending_events = []  # Accumulate events across all tool calls
 
         try:
-            for round_idx in range(1, self._MAX_BG_ROUNDS + 1):
+            while round_idx <= self._current_max_rounds:
+                # Hard ceiling — never exceeded even if _current_max_rounds was raised
+                if round_idx > self._absolute_max_rounds:
+                    break
+
                 if self._paused:
                     break
+
+                # Refresh system context so LLM always sees current round/limit counters
+                messages[0] = {"role": "system", "content": self._build_context(round_idx=round_idx)}
+
                 msg, usage = self._llm.chat(
                     messages=messages,
                     model=model,
@@ -244,6 +257,7 @@ class BackgroundConsciousness:
                 # If we have content but no tool calls, we're done
                 if content and not tool_calls:
                     final_content = content
+                    round_idx += 1
                     break
 
                 # If we have tool calls, execute them and continue loop
@@ -256,9 +270,11 @@ class BackgroundConsciousness:
                             "tool_call_id": tc.get("id", ""),
                             "content": result,
                         })
+                    round_idx += 1  # increment at end of each iteration
                     continue
 
                 # If neither content nor tool_calls, stop
+                round_idx += 1
                 break
 
             # Forward or defer accumulated events
@@ -297,7 +313,7 @@ class BackgroundConsciousness:
             return read_text(prompt_path)
         return "You are Ouroboros in background consciousness mode. Think."
 
-    def _build_context(self) -> str:
+    def _build_context(self, round_idx: int = 1) -> str:
         parts = [self._load_bg_prompt()]
 
         # Bible (abbreviated)
@@ -338,6 +354,10 @@ class BackgroundConsciousness:
 
         # Runtime info + state
         runtime_lines = [f"UTC: {utc_now_iso()}"]
+        runtime_lines.append(
+            f"Thinking rounds: {round_idx}/{self._current_max_rounds} "
+            f"(can request more via request_more_rounds)"
+        )
         runtime_lines.append(f"BG budget spent: ${self._bg_spent_usd:.4f}")
         runtime_lines.append(f"Current wakeup interval: {self._next_wakeup_sec}s")
 
@@ -369,6 +389,8 @@ class BackgroundConsciousness:
         # Memory & identity
         "send_owner_message", "schedule_task", "update_scratchpad",
         "update_identity", "set_next_wakeup",
+        # Cycle control (consciousness-specific)
+        "request_more_rounds",
         # Knowledge base
         "knowledge_read", "knowledge_write", "knowledge_list",
         # Read-only tools for awareness
@@ -398,6 +420,45 @@ class BackgroundConsciousness:
                             "description": "Seconds until next wakeup (60-3600)"},
             }, "required": ["seconds"]},
         }, _set_next_wakeup))
+
+        # Allows the LLM to extend the current thinking cycle when extra depth is needed
+        def _request_more_rounds(ctx: Any, reason: str, additional: int = 2) -> str:
+            if self._current_max_rounds + additional > self._absolute_max_rounds:
+                return (
+                    f"Denied: would exceed absolute limit ({self._absolute_max_rounds}). "
+                    f"Current max is {self._current_max_rounds}."
+                )
+            if not self._check_budget():
+                return "Denied: background consciousness budget exceeded."
+            self._current_max_rounds += additional
+            append_jsonl(self._drive_root / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "bg_rounds_extended",
+                "reason": reason,
+                "additional": additional,
+                "new_max": self._current_max_rounds,
+            })
+            return f"Granted: extended to {self._current_max_rounds} rounds. Reason logged."
+
+        registry.register(ToolEntry("request_more_rounds", {
+            "name": "request_more_rounds",
+            "description": (
+                "Request additional thinking rounds for this cycle. "
+                "Use when a complex thought process requires more iterations. "
+                "Budget permitting."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Why more rounds are needed",
+                },
+                "additional": {
+                    "type": "integer",
+                    "description": "How many more rounds to add (default 2)",
+                    "default": 2,
+                },
+            }, "required": ["reason"]},
+        }, _request_more_rounds))
 
         return registry
 
