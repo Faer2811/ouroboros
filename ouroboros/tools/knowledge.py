@@ -216,6 +216,23 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
     # Validate mode explicitly
     if mode not in ("overwrite", "append"):
         return f"⚠️ Invalid mode '{mode}'. Use 'overwrite' or 'append'."
+    # Phase 3: Permission check
+    from supervisor.state import load_state, get_user_id_from_task
+    st = load_state()
+    user_id = get_user_id_from_task(ctx.task)
+    owner_id = st.get("owner_id")
+    
+    if user_id and user_id != owner_id:
+        # Non-owner user → log suggestion instead
+        suggestion_path = ctx.drive_path("recsys/suggestions-log.md")
+        suggestion_path.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        suggestion = f"\n## [{timestamp}] User {user_id}\nRequested: knowledge_write {topic} ({mode})\nContent preview: {content[:200]}...\n"
+        with suggestion_path.open("a", encoding="utf-8") as f:
+            f.write(suggestion)
+        return f"⚠️ Non-owner users cannot write knowledge. Suggestion logged to recsys/suggestions-log.md"
+
 
     _ensure_dir(ctx)
 

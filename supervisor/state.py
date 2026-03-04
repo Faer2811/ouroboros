@@ -691,6 +691,14 @@ def is_allowed_user(user_id: int, st: Optional[Dict[str, Any]] = None) -> bool:
     return user_id in allowed
 
 
+
+def get_user_id_from_task(task: Dict[str, Any]) -> Optional[int]:
+    """Extract user_id from task context (if available)."""
+    try:
+        return task.get("user_id") or task.get("from_user_id")
+    except Exception:
+        return None
+
 def rotate_chat_log_if_needed(drive_root: pathlib.Path, max_bytes: int = 800_000) -> None:
     """Rotate chat log if it exceeds max_bytes."""
     chat = drive_root / "logs" / "chat.jsonl"

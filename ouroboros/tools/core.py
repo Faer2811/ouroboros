@@ -53,6 +53,23 @@ def _drive_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str
 
 def _drive_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrite") -> str:
     p = ctx.drive_path(path)
+    # Phase 3: Permission check
+    from supervisor.state import load_state, get_user_id_from_task
+    st = load_state()
+    user_id = get_user_id_from_task(ctx.task)
+    owner_id = st.get("owner_id")
+    
+    if user_id and user_id != owner_id:
+        # Non-owner user → log suggestion instead
+        suggestion_path = ctx.drive_path("recsys/suggestions-log.md")
+        suggestion_path.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        suggestion = f"\n## [{timestamp}] User {user_id}\nRequested: drive_write {path} ({mode})\nContent preview: {content[:200]}...\n"
+        with suggestion_path.open("a", encoding="utf-8") as f:
+            f.write(suggestion)
+        return f"⚠️ Non-owner users cannot write to Drive. Suggestion logged to recsys/suggestions-log.md"
+
     p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
         p.write_text(content, encoding="utf-8")
