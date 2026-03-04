@@ -201,6 +201,7 @@ init_state()
 
 from supervisor.telegram import (
     init as telegram_init, TelegramClient, send_with_budget, log_chat,
+    handle_incoming_message,
 )
 TG = TelegramClient(str(TELEGRAM_BOT_TOKEN))
 telegram_init(
@@ -417,6 +418,46 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
         kill_workers()
         os.execv(sys.executable, [sys.executable, __file__])
 
+    # /adduser <user_id>
+    if lowered.startswith("/adduser "):
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            send_with_budget(chat_id, "Usage: /adduser <user_id>")
+            return True
+        try:
+            new_user_id = int(parts[1])
+        except ValueError:
+            send_with_budget(chat_id, f"Invalid user_id: {parts[1]}")
+            return True
+
+        from supervisor.state import add_allowed_user
+        success = add_allowed_user(new_user_id)
+        if success:
+            send_with_budget(chat_id, f"✅ User {new_user_id} added to allowed_user_ids.")
+        else:
+            send_with_budget(chat_id, f"⚠️ User {new_user_id} already in list.")
+        return True
+
+    # /removeuser <user_id>
+    if lowered.startswith("/removeuser "):
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            send_with_budget(chat_id, "Usage: /removeuser <user_id>")
+            return True
+        try:
+            target_user_id = int(parts[1])
+        except ValueError:
+            send_with_budget(chat_id, f"Invalid user_id: {parts[1]}")
+            return True
+
+        from supervisor.state import remove_allowed_user
+        success = remove_allowed_user(target_user_id)
+        if success:
+            send_with_budget(chat_id, f"✅ User {target_user_id} removed from allowed_user_ids.")
+        else:
+            send_with_budget(chat_id, f"⚠️ User {target_user_id} not found in list.")
+        return True
+
     # Dual-path commands: supervisor handles + LLM sees a note
     if lowered.startswith("/status"):
         status = status_text(WORKERS, PENDING, RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
@@ -509,16 +550,44 @@ while True:
 
     for upd in updates:
         offset = int(upd["update_id"]) + 1
-        msg = upd.get("message") or upd.get("edited_message") or {}
-        if not msg:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        st = load_state()
+
+        # Owner registration: first-ever message becomes owner
+        if st.get("owner_id") is None:
+            _reg_msg = upd.get("message") or upd.get("edited_message") or {}
+            if not _reg_msg:
+                continue
+            _reg_user = _reg_msg.get("from") or {}
+            _reg_user_id = int(_reg_user.get("id") or 0)
+            _reg_chat_id = int((_reg_msg.get("chat") or {}).get("id") or 0)
+            _reg_text = str(_reg_msg.get("text") or "")
+            if not _reg_user_id or not _reg_chat_id:
+                continue
+            st["owner_id"] = _reg_user_id
+            st["owner_chat_id"] = _reg_chat_id
+            st["last_owner_message_at"] = now_iso
+            save_state(st)
+            log_chat("in", _reg_chat_id, _reg_user_id, _reg_text)
+            send_with_budget(_reg_chat_id, "✅ Owner registered. Ouroboros online.")
             continue
 
-        chat_id = int(msg["chat"]["id"])
-        from_user = msg.get("from") or {}
-        user_id = int(from_user.get("id") or 0)
-        text = str(msg.get("text") or "")
+        parsed = handle_incoming_message(
+            upd,
+            owner_id=st["owner_id"],
+            allowed_user_ids=st.get("allowed_user_ids", []),
+        )
+        if parsed is None:
+            continue  # ignore — unauthorized user or blocked command
+
+        user_id = parsed["user_id"]
+        chat_id = parsed["chat_id"]
+        text = parsed["text"]
+        is_owner = parsed["is_owner"]
+
+        # Extract image/caption from raw msg (not covered by handle_incoming_message)
+        msg = upd.get("message") or upd.get("edited_message") or {}
         caption = str(msg.get("caption") or "")
-        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         # Extract image if present
         image_data = None  # Will be (base64, mime_type, caption) or None
@@ -540,26 +609,16 @@ while True:
                     if b64:
                         image_data = (b64, mime, caption)
 
-        st = load_state()
-        if st.get("owner_id") is None:
-            st["owner_id"] = user_id
-            st["owner_chat_id"] = chat_id
-            st["last_owner_message_at"] = now_iso
-            save_state(st)
-            log_chat("in", chat_id, user_id, text)
-            send_with_budget(chat_id, "✅ Owner registered. Ouroboros online.")
-            continue
-
-        if user_id != int(st.get("owner_id")):
-            continue
-
         log_chat("in", chat_id, user_id, text)
-        st["last_owner_message_at"] = now_iso
+        if is_owner:
+            st["last_owner_message_at"] = now_iso
         _last_message_ts = time.time()
         save_state(st)
 
         # --- Supervisor commands ---
         if text.strip().lower().startswith("/"):
+            if not is_owner:
+                continue  # safeguard: slash commands only for owner (blocked upstream)
             try:
                 result = _handle_supervisor_command(text, chat_id, tg_offset=offset)
                 if result is True:
@@ -613,37 +672,48 @@ while True:
                     break
                 for _upd in _extra_updates:
                     offset = max(offset, int(_upd.get("update_id", offset - 1)) + 1)
+                    _parsed2 = handle_incoming_message(
+                        _upd,
+                        owner_id=_batch_state["owner_id"],
+                        allowed_user_ids=_batch_state.get("allowed_user_ids", []),
+                    )
+                    if _parsed2 is None:
+                        continue
+                    _uid2 = _parsed2["user_id"]
+                    _cid2 = _parsed2["chat_id"]
+                    _txt2 = _parsed2["text"]
+                    _is_owner2 = _parsed2["is_owner"]
                     _msg2 = _upd.get("message") or _upd.get("edited_message") or {}
-                    _uid2 = (_msg2.get("from") or {}).get("id")
-                    _cid2 = (_msg2.get("chat") or {}).get("id")
-                    _txt2 = _msg2.get("text") or _msg2.get("caption") or ""
-                    if _uid2 and _batch_state.get("owner_id") and _uid2 == int(_batch_state["owner_id"]):
-                        log_chat("in", _cid2, _uid2, _txt2)
+                    _caption2 = str(_msg2.get("caption") or "")
+                    log_chat("in", _cid2, _uid2, _txt2)
+                    if _is_owner2:
                         _batch_state["last_owner_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                        _batch_state_dirty = True
-                        # Handle supervisor commands in batch window
-                        if _txt2.strip().lower().startswith("/"):
-                            try:
-                                _cmd_result = _handle_supervisor_command(_txt2, _cid2, tg_offset=offset)
-                                if _cmd_result is True:
-                                    continue  # terminal command, don't batch
-                                elif _cmd_result:
-                                    _txt2 = _cmd_result + _txt2  # dual-path: prepend note
-                            except SystemExit:
-                                raise
-                            except Exception:
-                                log.warning("Supervisor command in batch failed", exc_info=True)
-                        if _txt2:
-                            _batched_texts.append(_txt2)
-                            _batch_deadline = max(_batch_deadline, time.time() + 0.3)  # extend for burst
-                        if not _batched_image:
-                            _doc2 = _msg2.get("document") or {}
-                            _photo2 = (_msg2.get("photo") or [None])[-1] or {}
-                            _fid2 = _photo2.get("file_id") or _doc2.get("file_id")
-                            if _fid2:
-                                _b642, _mime2 = TG.download_file_base64(_fid2)
-                                if _b642:
-                                    _batched_image = (_b642, _mime2, _txt2)
+                    _batch_state_dirty = True
+                    # Handle supervisor commands in batch window
+                    if _txt2.strip().lower().startswith("/"):
+                        if not _is_owner2:
+                            continue  # safeguard: slash commands only for owner
+                        try:
+                            _cmd_result = _handle_supervisor_command(_txt2, _cid2, tg_offset=offset)
+                            if _cmd_result is True:
+                                continue  # terminal command, don't batch
+                            elif _cmd_result:
+                                _txt2 = _cmd_result + _txt2  # dual-path: prepend note
+                        except SystemExit:
+                            raise
+                        except Exception:
+                            log.warning("Supervisor command in batch failed", exc_info=True)
+                    if _txt2:
+                        _batched_texts.append(_txt2)
+                        _batch_deadline = max(_batch_deadline, time.time() + 0.3)  # extend for burst
+                    if not _batched_image:
+                        _doc2 = _msg2.get("document") or {}
+                        _photo2 = (_msg2.get("photo") or [None])[-1] or {}
+                        _fid2 = _photo2.get("file_id") or _doc2.get("file_id")
+                        if _fid2:
+                            _b642, _mime2 = TG.download_file_base64(_fid2)
+                            if _b642:
+                                _batched_image = (_b642, _mime2, _txt2 or _caption2)
 
             # Save state once if mutated during batch window
             if _batch_state_dirty:

@@ -417,6 +417,49 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
     })
 
 
+def send_message_to_owner(sender_id: int, owner_id: int, allowed_user_ids: List[int],
+                          chat_id: int, text: str,
+                          fmt: str = "", force_budget: bool = False) -> None:
+    """Send a message to owner's chat, gated by sender permission check."""
+    if sender_id != owner_id and sender_id not in allowed_user_ids:
+        log.debug("send_message_to_owner: ignored — sender_id=%d not authorized", sender_id)
+        return
+    send_with_budget(chat_id, text, fmt=fmt, force_budget=force_budget)
+
+
+def handle_incoming_message(update: Dict, owner_id: int,
+                             allowed_user_ids: List[int]) -> Optional[Dict]:
+    """Parse incoming Telegram update, check permissions, return task dict or None."""
+    msg = update.get("message") or update.get("edited_message")
+    if not msg:
+        return None
+
+    user = msg.get("from") or {}
+    user_id: Optional[int] = user.get("id")
+    chat_id: Optional[int] = (msg.get("chat") or {}).get("id")
+    text: str = msg.get("text") or ""
+    message_id: Optional[int] = msg.get("message_id")
+
+    if user_id is None or chat_id is None:
+        return None
+
+    if user_id != owner_id and user_id not in allowed_user_ids:
+        log.debug("handle_incoming_message: ignored — user_id=%d not authorized", user_id)
+        return None
+
+    if text.startswith("/") and user_id != owner_id:
+        log.debug("handle_incoming_message: blocked slash-command from user_id=%d", user_id)
+        return None
+
+    return {
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "text": text,
+        "message_id": message_id,
+        "is_owner": user_id == owner_id,
+    }
+
+
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      force_budget: bool = False, fmt: str = "",
                      is_progress: bool = False) -> None:
