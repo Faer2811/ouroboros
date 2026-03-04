@@ -351,11 +351,15 @@ class OuroborosAgent:
         self._emit_typing_start()
 
         # --- Build context (delegated to context.py) ---
+        task_user_id = task.get("user_id")
+        if task_user_id is not None:
+            task_user_id = int(task_user_id)
         messages, cap_info = build_llm_messages(
             env=self.env,
             memory=self.memory,
             task=task,
             review_context_builder=self._build_review_context,
+            task_user_id=task_user_id,
         )
 
         if cap_info.get("trimmed_sections"):

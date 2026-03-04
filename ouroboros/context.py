@@ -56,7 +56,7 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
     return parts
 
 
-def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
+def _build_runtime_section(env: Any, task: Dict[str, Any], task_user_id: Optional[int] = None) -> str:
     """Build the runtime context section (utc_now, repo_dir, drive_root, git_head, git_branch, task info, budget info)."""
     # --- Git context ---
     try:
@@ -87,6 +87,8 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         "git_branch": git_branch,
         "task": {"id": task.get("id"), "type": task.get("type")},
     }
+    if task_user_id is not None:
+        runtime_data["user_id"] = task_user_id
     if budget_info:
         runtime_data["budget"] = budget_info
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
@@ -282,6 +284,7 @@ def build_llm_messages(
     memory: Memory,
     task: Dict[str, Any],
     review_context_builder: Optional[Any] = None,
+    task_user_id: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -343,7 +346,7 @@ def build_llm_messages(
     # Dynamic content: changes every round
     dynamic_parts = [
         "## Drive state\n\n" + clip_text(state_json, 90000),
-        _build_runtime_section(env, task),
+        _build_runtime_section(env, task, task_user_id=task_user_id),
     ]
 
     # Health invariants — surfaces anomalies for LLM-first self-detection (Bible P0+P3)
