@@ -406,6 +406,13 @@ def budget_line(force: bool = False) -> str:
         return ""
 
 
+def log_supervisor(payload: Dict[str, Any]) -> None:
+    append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        **payload,
+    })
+
+
 def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
     append_jsonl(DRIVE_ROOT / "logs" / "chat.jsonl", {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -445,6 +452,13 @@ def handle_incoming_message(update: Dict, owner_id: int,
 
     if user_id != owner_id and user_id not in allowed_user_ids:
         log.debug("handle_incoming_message: ignored — user_id=%d not authorized", user_id)
+        log_supervisor({
+            "event": "unauthorized_message_attempt",
+            "user_id": user_id,
+            "username": update.get("message", {}).get("from", {}).get("username"),
+            "first_name": update.get("message", {}).get("from", {}).get("first_name"),
+            "text_snippet": text[:100] if text else None,
+        })
         return None
 
     if text.startswith("/") and user_id != owner_id:
