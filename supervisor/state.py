@@ -146,6 +146,7 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("budget_drift_pct", None)
     st.setdefault("budget_drift_alert", False)
     st.setdefault("evolution_consecutive_failures", 0)
+    st.setdefault("allowed_user_ids", [])
     for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
                         "last_auto_review_at", "last_review_task_id", "session_daily_snapshot"):
         st.pop(legacy_key, None)
@@ -553,6 +554,8 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
     now = time.time()
     lines = []
     lines.append(f"owner_id: {st.get('owner_id')}")
+    allowed_count = len(st.get("allowed_user_ids", []))
+    lines.append(f"allowed_users: {allowed_count}")
     lines.append(f"session_id: {st.get('session_id')}")
     lines.append(f"version: {st.get('current_branch')}@{(st.get('current_sha') or '')[:8]}")
     busy_count = sum(1 for w in workers_dict.values() if getattr(w, 'busy_task_id', None) is not None)
@@ -645,6 +648,47 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
     lines.append(f"last_owner_message_at: {st.get('last_owner_message_at') or '-'}")
     lines.append(f"timeouts: soft={soft_timeout_sec}s, hard={hard_timeout_sec}s")
     return "\n".join(lines)
+
+
+def add_allowed_user(user_id: int) -> None:
+    """Add a user to allowed_user_ids list."""
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        allowed = st.get("allowed_user_ids", [])
+        if user_id not in allowed:
+            allowed.append(user_id)
+            st["allowed_user_ids"] = allowed
+            _save_state_unlocked(st)
+            log.info(f"Added user {user_id} to allowed_user_ids")
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
+def remove_allowed_user(user_id: int) -> None:
+    """Remove a user from allowed_user_ids list."""
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        allowed = st.get("allowed_user_ids", [])
+        if user_id in allowed:
+            allowed.remove(user_id)
+            st["allowed_user_ids"] = allowed
+            _save_state_unlocked(st)
+            log.info(f"Removed user {user_id} from allowed_user_ids")
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
+def is_allowed_user(user_id: int, st: Optional[Dict[str, Any]] = None) -> bool:
+    """Check if user_id is owner or in allowed_user_ids list."""
+    if st is None:
+        st = load_state()
+    owner_id = st.get("owner_id")
+    if owner_id is not None and user_id == owner_id:
+        return True
+    allowed = st.get("allowed_user_ids", [])
+    return user_id in allowed
 
 
 def rotate_chat_log_if_needed(drive_root: pathlib.Path, max_bytes: int = 800_000) -> None:
