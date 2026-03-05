@@ -55,7 +55,7 @@ def _drive_write(ctx: ToolContext, path: str, content: str, mode: str = "overwri
     p = ctx.drive_path(path)
     # Phase 3: Permission check
     from supervisor.state import is_owner, get_user_id_from_task
-    user_id = get_user_id_from_task()
+    user_id = get_user_id_from_task(ctx.task)
     if user_id and not is_owner(user_id):
         # Non-owner user → log suggestion instead
         suggestion_path = ctx.drive_path("recsys/suggestions-log.md")

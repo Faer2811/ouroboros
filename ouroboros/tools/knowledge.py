@@ -218,7 +218,7 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
         return f"⚠️ Invalid mode '{mode}'. Use 'overwrite' or 'append'."
     # Phase 3: Permission check
     from supervisor.state import is_owner, get_user_id_from_task
-    user_id = get_user_id_from_task()
+    user_id = get_user_id_from_task(ctx.task)
     if user_id and not is_owner(user_id):
         # Non-owner user → log suggestion instead
         suggestion_path = ctx.drive_path("recsys/suggestions-log.md")
