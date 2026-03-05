@@ -699,6 +699,16 @@ def get_user_id_from_task(task: Dict[str, Any]) -> Optional[int]:
     except Exception:
         return None
 
+
+def is_owner(user_id: Optional[int], st: Optional[Dict[str, Any]] = None) -> bool:
+    """Return True if user_id is None (system/owner task) or matches owner_id in state."""
+    if user_id is None:
+        return True
+    if st is None:
+        st = load_state()
+    owner_id = st.get("owner_id")
+    return owner_id is not None and user_id == owner_id
+
 def rotate_chat_log_if_needed(drive_root: pathlib.Path, max_bytes: int = 800_000) -> None:
     """Rotate chat log if it exceeds max_bytes."""
     chat = drive_root / "logs" / "chat.jsonl"

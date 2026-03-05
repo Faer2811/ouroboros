@@ -334,6 +334,9 @@ class OuroborosAgent:
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task})
 
         # Set tool context for this task
+        task_user_id = task.get("user_id")
+        if task_user_id is not None:
+            task_user_id = int(task_user_id)
         ctx = ToolContext(
             repo_dir=self.env.repo_dir,
             drive_root=self.env.drive_root,
@@ -344,6 +347,7 @@ class OuroborosAgent:
             emit_progress_fn=self._emit_progress,
             task_depth=int(task.get("depth", 0)),
             is_direct_chat=bool(task.get("_is_direct_chat")),
+            user_id=task_user_id,
         )
         self.tools.set_context(ctx)
 
@@ -351,9 +355,6 @@ class OuroborosAgent:
         self._emit_typing_start()
 
         # --- Build context (delegated to context.py) ---
-        task_user_id = task.get("user_id")
-        if task_user_id is not None:
-            task_user_id = int(task_user_id)
         messages, cap_info = build_llm_messages(
             env=self.env,
             memory=self.memory,
