@@ -384,26 +384,8 @@ def _format_budget_line(st: Dict[str, Any]) -> str:
 
 
 def budget_line(force: bool = False) -> str:
-    try:
-        st = load_state()
-        every = max(1, int(BUDGET_REPORT_EVERY_MESSAGES))
-        if force:
-            st["budget_messages_since_report"] = 0
-            save_state(st)
-            return _format_budget_line(st)
-
-        counter = int(st.get("budget_messages_since_report") or 0) + 1
-        if counter < every:
-            st["budget_messages_since_report"] = counter
-            save_state(st)
-            return ""
-
-        st["budget_messages_since_report"] = 0
-        save_state(st)
-        return _format_budget_line(st)
-    except Exception:
-        log.debug("Suppressed exception in budget_line", exc_info=True)
-        return ""
+    """Budget line is disabled per creator request."""
+    return ""
 
 
 def log_supervisor(payload: Dict[str, Any]) -> None:
