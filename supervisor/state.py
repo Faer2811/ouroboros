@@ -692,14 +692,6 @@ def is_allowed_user(user_id: int, st: Optional[Dict[str, Any]] = None) -> bool:
 
 
 
-def get_user_id_from_task(task: Dict[str, Any]) -> Optional[int]:
-    """Extract user_id from task context (if available)."""
-    try:
-        return task.get("user_id") or task.get("from_user_id")
-    except Exception:
-        return None
-
-
 def is_owner(user_id: Optional[int], st: Optional[Dict[str, Any]] = None) -> bool:
     """Return True if user_id is None (system/owner task) or matches owner_id in state."""
     if user_id is None:
