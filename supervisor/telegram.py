@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from supervisor.state import load_state, save_state, append_jsonl
+from supervisor.state import load_state, save_state, append_jsonl, \
+    get_user_session, start_user_session, update_user_session, end_user_session
+from supervisor.portrait import check_portrait_trigger
 
 log = logging.getLogger(__name__)
 
@@ -446,6 +448,18 @@ def handle_incoming_message(update: Dict, owner_id: int,
     if text.startswith("/") and user_id != owner_id:
         log.debug("handle_incoming_message: blocked slash-command from user_id=%d", user_id)
         return None
+
+    # Track user session for portrait analysis (allowed_users only, not owner)
+    if user_id != owner_id:
+        session = get_user_session(user_id)
+        if session is None:
+            start_user_session(user_id)
+        update_user_session(user_id, message_id)
+
+        # Check if portrait trigger needed; runs in background, doesn't block
+        session = get_user_session(user_id)
+        if session and session["message_count"] >= 3:
+            check_portrait_trigger(user_id)
 
     return {
         "user_id": user_id,
