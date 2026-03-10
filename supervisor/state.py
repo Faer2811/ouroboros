@@ -147,6 +147,7 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("budget_drift_alert", False)
     st.setdefault("evolution_consecutive_failures", 0)
     st.setdefault("allowed_user_ids", [])
+    st.setdefault("user_sessions", {})
     for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
                         "last_auto_review_at", "last_review_task_id", "session_daily_snapshot"):
         st.pop(legacy_key, None)
@@ -201,6 +202,105 @@ def save_state(st: Dict[str, Any]) -> None:
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
         _save_state_unlocked(st)
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
+# ---------------------------------------------------------------------------
+# User session tracking (для портретного анализа)
+# ---------------------------------------------------------------------------
+
+def get_user_session(user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Получить активную сессию пользователя или None.
+
+    Returns:
+        {
+            "user_id": int,
+            "started_at": ISO timestamp,
+            "last_message_at": ISO timestamp,
+            "message_count": int,
+            "messages": [список message_id для извлечения из chat.jsonl]
+        }
+    """
+    st = load_state()
+    sessions = st.get("user_sessions", {})
+    return sessions.get(str(user_id))
+
+
+def start_user_session(user_id: int) -> None:
+    """Начать новую сессию для пользователя."""
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        sessions = st.setdefault("user_sessions", {})
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        sessions[str(user_id)] = {
+            "user_id": user_id,
+            "started_at": now,
+            "last_message_at": now,
+            "message_count": 0,
+            "messages": []
+        }
+        _save_state_unlocked(st)
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
+def update_user_session(user_id: int, message_id: Optional[str] = None) -> None:
+    """
+    Обновить timestamp и счётчик сообщений активной сессии.
+
+    Args:
+        user_id: ID пользователя
+        message_id: Опциональный ID сообщения для добавления в список
+    """
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        sessions = st.setdefault("user_sessions", {})
+        session = sessions.get(str(user_id))
+
+        if session is None:
+            # Создать новую сессию если нет активной
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            session = {
+                "user_id": user_id,
+                "started_at": now,
+                "last_message_at": now,
+                "message_count": 0,
+                "messages": []
+            }
+            sessions[str(user_id)] = session
+
+        # Обновить timestamp и счётчик
+        session["last_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        session["message_count"] = session.get("message_count", 0) + 1
+
+        # Добавить message_id если передан
+        if message_id:
+            messages = session.setdefault("messages", [])
+            messages.append(message_id)
+
+        _save_state_unlocked(st)
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
+def end_user_session(user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Завершить сессию пользователя и вернуть её данные.
+
+    Returns:
+        Session dict или None если сессии не было
+    """
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        sessions = st.get("user_sessions", {})
+        session = sessions.pop(str(user_id), None)
+        _save_state_unlocked(st)
+        return session
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
