@@ -456,7 +456,7 @@ def handle_incoming_message(update: Dict, owner_id: int,
         if not session:
             start_user_session(user_id)
         else:
-            update_user_session(user_id, message_id)
+            update_user_session(user_id, message_id, text_raw)
 
         # Check if portrait trigger needed; runs in background, doesn't block
         session = get_user_session(user_id)

@@ -252,7 +252,7 @@ def start_user_session(user_id: int) -> None:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
 
-def update_user_session(user_id: int, message_id: Optional[str] = None) -> None:
+def update_user_session(user_id: int, message_id: Optional[str] = None, text: Optional[str] = None) -> None:
     """
     Обновить timestamp и счётчик сообщений активной сессии.
 
@@ -282,10 +282,14 @@ def update_user_session(user_id: int, message_id: Optional[str] = None) -> None:
         session["last_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         session["message_count"] = session.get("message_count", 0) + 1
 
-        # Добавить message_id если передан
-        if message_id:
+        # Добавить сообщение если передан message_id и text
+        if message_id and text:
             messages = session.setdefault("messages", [])
-            messages.append(message_id)
+            messages.append({
+                "id": message_id,
+                "text": text,
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            })
 
         _save_state_unlocked(st)
         save_session_to_drive(user_id)
