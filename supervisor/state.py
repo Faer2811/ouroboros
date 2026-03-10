@@ -26,15 +26,17 @@ STATE_PATH: pathlib.Path = DRIVE_ROOT / "state" / "state.json"
 STATE_LAST_GOOD_PATH: pathlib.Path = DRIVE_ROOT / "state" / "state.last_good.json"
 STATE_LOCK_PATH: pathlib.Path = DRIVE_ROOT / "locks" / "state.lock"
 QUEUE_SNAPSHOT_PATH: pathlib.Path = DRIVE_ROOT / "state" / "queue_snapshot.json"
+SESSIONS_DIR: pathlib.Path = DRIVE_ROOT / "sessions"
 
 
 def init(drive_root: pathlib.Path, total_budget_limit: float = 0.0) -> None:
-    global DRIVE_ROOT, STATE_PATH, STATE_LAST_GOOD_PATH, STATE_LOCK_PATH, QUEUE_SNAPSHOT_PATH
+    global DRIVE_ROOT, STATE_PATH, STATE_LAST_GOOD_PATH, STATE_LOCK_PATH, QUEUE_SNAPSHOT_PATH, SESSIONS_DIR
     DRIVE_ROOT = drive_root
     STATE_PATH = drive_root / "state" / "state.json"
     STATE_LAST_GOOD_PATH = drive_root / "state" / "state.last_good.json"
     STATE_LOCK_PATH = drive_root / "locks" / "state.lock"
     QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
+    SESSIONS_DIR = drive_root / "sessions"
     set_budget_limit(total_budget_limit)
 
 
@@ -243,6 +245,7 @@ def start_user_session(user_id: int) -> None:
             "messages": []
         }
         _save_state_unlocked(st)
+        save_session_to_drive(user_id)
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
@@ -283,6 +286,7 @@ def update_user_session(user_id: int, message_id: Optional[str] = None) -> None:
             messages.append(message_id)
 
         _save_state_unlocked(st)
+        save_session_to_drive(user_id)
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
@@ -303,6 +307,90 @@ def end_user_session(user_id: int) -> Optional[Dict[str, Any]]:
         return session
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
+# ---------------------------------------------------------------------------
+# Session persistence (для восстановления после рестарта)
+# ---------------------------------------------------------------------------
+
+
+def _session_file_path(user_id: int) -> pathlib.Path:
+    """Путь к файлу сессии пользователя."""
+    return SESSIONS_DIR / f"{user_id}.json"
+
+
+def save_session_to_drive(user_id: int) -> None:
+    """
+    Сохранить текущую сессию пользователя на Drive.
+
+    Вызывается после start_user_session() и update_user_session().
+    """
+    try:
+        session = get_user_session(user_id)
+        if session is None:
+            return
+
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        session_path = _session_file_path(user_id)
+
+        payload = json.dumps(session, ensure_ascii=False, indent=2)
+        atomic_write_text(session_path, payload)
+
+        log.debug(f"Session saved to Drive: {session_path}")
+    except Exception:
+        log.warning(f"Failed to save session to Drive for user {user_id}", exc_info=True)
+
+
+def load_sessions_from_drive() -> Dict[str, Dict[str, Any]]:
+    """
+    Восстановить все активные сессии из /sessions/*.json.
+
+    Вызывается при старте supervisor для восстановления состояния после рестарта.
+
+    Returns:
+        Dict[str(user_id), session_dict]
+    """
+    sessions = {}
+
+    try:
+        if not SESSIONS_DIR.exists():
+            return sessions
+
+        for session_file in SESSIONS_DIR.glob("*.json"):
+            try:
+                user_id = session_file.stem  # "123456.json" -> "123456"
+                session_data = json_load_file(session_file)
+
+                if session_data and isinstance(session_data, dict):
+                    sessions[user_id] = session_data
+                    log.debug(f"Restored session from {session_file}")
+
+            except Exception:
+                log.warning(f"Failed to load session file {session_file}", exc_info=True)
+                continue
+
+        if sessions:
+            log.info(f"Restored {len(sessions)} active session(s) from Drive")
+
+    except Exception:
+        log.warning("Failed to load sessions from Drive", exc_info=True)
+
+    return sessions
+
+
+def delete_session_file(user_id: int) -> None:
+    """
+    Удалить файл сессии после завершения портретного анализа.
+
+    Вызывается из portrait.py после успешного generate_portrait().
+    """
+    try:
+        session_path = _session_file_path(user_id)
+        if session_path.exists():
+            session_path.unlink()
+            log.debug(f"Session file deleted: {session_path}")
+    except Exception:
+        log.warning(f"Failed to delete session file for user {user_id}", exc_info=True)
 
 
 def init_state() -> Dict[str, Any]:
