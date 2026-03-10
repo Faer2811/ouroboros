@@ -330,6 +330,7 @@ def check_portrait_trigger(user_id: int) -> None:
 
     def _run() -> None:
         try:
+            log.info("Portrait analysis thread started for user_id=%s", user_id)
             from supervisor.state import DRIVE_ROOT, start_user_session
             import datetime
 
