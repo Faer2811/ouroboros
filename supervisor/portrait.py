@@ -1,0 +1,396 @@
+"""
+Supervisor — Portrait analysis module.
+
+Generates psychological/professional portraits of staff (RecSys specialists)
+based on conversation history using Claude Haiku.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import pathlib
+from typing import Any, Dict, List, Optional
+
+log = logging.getLogger(__name__)
+
+PORTRAIT_MODEL = "anthropic/claude-haiku-4-5-20251001"
+
+# ---------------------------------------------------------------------------
+# Knowledge base helpers
+# ---------------------------------------------------------------------------
+
+def _read_knowledge_file(drive_root: pathlib.Path, filename: str) -> str:
+    """Read a knowledge file from Drive memory/knowledge/. Returns empty string on failure."""
+    path = drive_root / "memory" / "knowledge" / filename
+    if not path.exists():
+        log.warning("Knowledge file not found: %s", path)
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        log.warning("Failed to read knowledge file: %s", path, exc_info=True)
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# get_username
+# ---------------------------------------------------------------------------
+
+def get_username(user_id: int) -> str:
+    """
+    Get username for user_id from state.json.
+
+    Returns username string or "user_{user_id}" as fallback.
+    """
+    from supervisor.state import load_state
+    try:
+        st = load_state()
+        # Check user_sessions for stored username
+        sessions = st.get("user_sessions", {})
+        session = sessions.get(str(user_id), {})
+        username = session.get("username")
+        if username:
+            return str(username)
+
+        # Check allowed_user_ids metadata if available
+        users_meta = st.get("users_meta", {})
+        meta = users_meta.get(str(user_id), {})
+        username = meta.get("username")
+        if username:
+            return str(username)
+    except Exception:
+        log.debug("Failed to load state for get_username(user_id=%s)", user_id, exc_info=True)
+
+    return f"user_{user_id}"
+
+
+# ---------------------------------------------------------------------------
+# generate_portrait
+# ---------------------------------------------------------------------------
+
+def generate_portrait(
+    user_id: int,
+    messages: List[Dict[str, Any]],
+    previous_profile: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Generate a portrait of a staff member based on conversation messages.
+
+    Args:
+        user_id: Telegram user ID
+        messages: List of {"role": "user/assistant", "content": str, "timestamp": str}
+        previous_profile: Optional previous profile dict for context/dynamics
+
+    Returns:
+        Structured portrait dict as JSON from LLM analysis.
+    """
+    from ouroboros.llm import LLMClient
+    from supervisor.state import DRIVE_ROOT
+
+    if not messages:
+        log.warning("generate_portrait called with empty messages for user_id=%s", user_id)
+        return {"error": "no messages provided", "user_id": user_id}
+
+    # Load knowledge base files
+    portrait_prompt = _read_knowledge_file(DRIVE_ROOT, "staff-portrait-prompt.md")
+    specialist_profile = _read_knowledge_file(DRIVE_ROOT, "recsys-specialist-profile.md")
+
+    # Build system prompt
+    system_parts = []
+    if portrait_prompt:
+        system_parts.append(portrait_prompt)
+    else:
+        system_parts.append(
+            "You are an expert analyst specializing in professional and psychological profiling of RecSys specialists.\n"
+            "Analyze the conversation and return a structured JSON portrait.\n"
+            "The JSON must include fields: user_id, analysis_date, communication_style, "
+            "technical_level, knowledge_areas, personality_traits, engagement_patterns, "
+            "strengths, growth_areas, summary, confidence_score (0.0-1.0)."
+        )
+    if specialist_profile:
+        system_parts.append("\n\n---\n# RecSys Specialist Profile Reference\n\n" + specialist_profile)
+
+    system_text = "\n".join(system_parts)
+
+    # Format conversation for analysis
+    formatted_messages = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        ts = msg.get("timestamp", "")
+        ts_prefix = f"[{ts}] " if ts else ""
+        formatted_messages.append(f"{ts_prefix}{role.upper()}: {content}")
+
+    conversation_text = "\n\n".join(formatted_messages)
+
+    # Build previous profile context if available
+    prev_context = ""
+    if previous_profile:
+        try:
+            prev_json = json.dumps(previous_profile, ensure_ascii=False, indent=2)
+            prev_context = f"\n\n---\n# Previous Profile (use for tracking dynamics)\n\n{prev_json}"
+        except Exception:
+            log.debug("Failed to serialize previous_profile", exc_info=True)
+
+    user_message = (
+        f"Analyze the following conversation with user_id={user_id} and generate a structured portrait.\n"
+        f"Return ONLY valid JSON, no markdown fences, no explanation.\n"
+        f"{prev_context}\n\n"
+        f"---\n# Conversation\n\n{conversation_text}"
+    )
+
+    # Build messages with prompt caching on system message
+    llm_messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": user_message,
+                }
+            ],
+        }
+    ]
+
+    # System message with cache_control for prompt caching
+    # Passed as first message with role "system" + cache_control on content block
+    system_message = {
+        "role": "system",
+        "content": [
+            {
+                "type": "text",
+                "text": system_text,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+    }
+
+    all_messages = [system_message] + llm_messages
+
+    try:
+        client = LLMClient()
+        response_msg, usage = client.chat(
+            messages=all_messages,
+            model=PORTRAIT_MODEL,
+            max_tokens=1500,
+            reasoning_effort="none",
+        )
+        raw_content = response_msg.get("content") or ""
+
+        # Parse JSON from response
+        portrait_data = _parse_json_response(raw_content)
+        portrait_data["user_id"] = user_id
+        portrait_data["_model"] = PORTRAIT_MODEL
+        portrait_data["_usage"] = {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "cached_tokens": usage.get("cached_tokens", 0),
+            "cost": usage.get("cost", 0),
+        }
+        return portrait_data
+
+    except Exception:
+        log.error("generate_portrait failed for user_id=%s", user_id, exc_info=True)
+        return {"error": "llm_call_failed", "user_id": user_id}
+
+
+def _parse_json_response(raw: str) -> Dict[str, Any]:
+    """Parse JSON from LLM response, stripping markdown fences if present."""
+    text = raw.strip()
+
+    # Strip ```json ... ``` or ``` ... ```
+    if text.startswith("```"):
+        lines = text.splitlines()
+        # Drop first line (```json or ```) and last line (```)
+        inner_lines = lines[1:]
+        if inner_lines and inner_lines[-1].strip() == "```":
+            inner_lines = inner_lines[:-1]
+        text = "\n".join(inner_lines).strip()
+
+    try:
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+        return {"data": result}
+    except json.JSONDecodeError:
+        log.warning("LLM returned non-JSON portrait response: %s", text[:200])
+        return {"raw_response": text, "parse_error": "invalid_json"}
+
+
+# ---------------------------------------------------------------------------
+# save_conversation_log
+# ---------------------------------------------------------------------------
+
+def save_conversation_log(user_id: int, date: str, portrait_data: Dict[str, Any]) -> None:
+    """
+    Save conversation log to Drive: /logs/recsys/YYYY-MM-DD-[username].json
+
+    Args:
+        user_id: Telegram user ID
+        date: Date string in YYYY-MM-DD format
+        portrait_data: Portrait analysis result dict
+    """
+    from supervisor.state import DRIVE_ROOT
+
+    username = get_username(user_id)
+    filename = f"{date}-{username}.json"
+    log_path = DRIVE_ROOT / "logs" / "recsys" / filename
+
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(portrait_data, ensure_ascii=False, indent=2)
+        log_path.write_text(payload, encoding="utf-8")
+        log.info("Saved conversation log: %s", log_path)
+    except Exception:
+        log.error("Failed to save conversation log for user_id=%s date=%s", user_id, date, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# update_user_profile
+# ---------------------------------------------------------------------------
+
+def update_user_profile(user_id: int, new_portrait: Dict[str, Any]) -> None:
+    """
+    Read previous profile, merge new portrait entry with dynamics, save updated profile.
+
+    Profile path: /profiles/[username].json
+    Accumulates all portrait entries with dates.
+    """
+    from supervisor.state import DRIVE_ROOT
+    import datetime
+
+    username = get_username(user_id)
+    profile_path = DRIVE_ROOT / "profiles" / f"{username}.json"
+
+    # Load existing profile if it exists
+    existing_profile: Dict[str, Any] = {}
+    if profile_path.exists():
+        try:
+            existing_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            if not isinstance(existing_profile, dict):
+                existing_profile = {}
+        except Exception:
+            log.warning("Failed to read existing profile for user_id=%s, starting fresh", user_id, exc_info=True)
+            existing_profile = {}
+
+    # Initialize profile structure if new
+    if not existing_profile:
+        existing_profile = {
+            "user_id": user_id,
+            "username": username,
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "entries": [],
+            "dynamics": {},
+        }
+
+    # Append new portrait entry with timestamp
+    entry = {
+        "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
+        "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "portrait": new_portrait,
+    }
+    entries: List[Dict[str, Any]] = existing_profile.setdefault("entries", [])
+    entries.append(entry)
+
+    # Update dynamics: track changes in key scalar fields across entries
+    dynamics = existing_profile.setdefault("dynamics", {})
+    tracked_fields = ("technical_level", "confidence_score", "engagement_patterns", "communication_style")
+    for field in tracked_fields:
+        value = new_portrait.get(field)
+        if value is not None:
+            history = dynamics.setdefault(field, [])
+            history.append({"date": entry["date"], "value": value})
+
+    existing_profile["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    existing_profile["username"] = username  # keep in sync
+
+    try:
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(existing_profile, ensure_ascii=False, indent=2)
+        profile_path.write_text(payload, encoding="utf-8")
+        log.info("Updated profile for user_id=%s at %s", user_id, profile_path)
+    except Exception:
+        log.error("Failed to save profile for user_id=%s", user_id, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# check_portrait_trigger
+# ---------------------------------------------------------------------------
+
+def check_portrait_trigger(user_id: int) -> None:
+    """
+    Trigger portrait analysis for user_id in a background daemon thread (non-blocking).
+
+    Reads recent inbound messages from chat.jsonl, generates a portrait via LLM,
+    saves the conversation log and updates the user profile. After completion,
+    resets the session message counter so the trigger can fire again.
+    """
+    import threading
+
+    def _run() -> None:
+        try:
+            from supervisor.state import DRIVE_ROOT, start_user_session
+            import datetime
+
+            # Read inbound messages for this user from chat.jsonl
+            chat_log_path = DRIVE_ROOT / "logs" / "chat.jsonl"
+            messages: List[Dict[str, Any]] = []
+            if chat_log_path.exists():
+                with open(chat_log_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("user_id") == user_id and entry.get("direction") == "in":
+                                content = entry.get("text", "")
+                                if content:
+                                    messages.append({
+                                        "role": "user",
+                                        "content": content,
+                                        "timestamp": entry.get("ts", ""),
+                                    })
+                        except Exception:
+                            pass
+
+            if not messages:
+                log.debug("check_portrait_trigger: no messages found for user_id=%s", user_id)
+                return
+
+            # Load previous profile for dynamics tracking
+            username = get_username(user_id)
+            profile_path = DRIVE_ROOT / "profiles" / f"{username}.json"
+            previous_profile: Optional[Dict[str, Any]] = None
+            if profile_path.exists():
+                try:
+                    previous_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+                except Exception:
+                    log.debug("Failed to load previous profile for user_id=%s", user_id, exc_info=True)
+
+            # Generate portrait via LLM
+            portrait_data = generate_portrait(user_id, messages, previous_profile)
+
+            if "error" in portrait_data:
+                log.warning("Portrait generation returned error for user_id=%s: %s",
+                            user_id, portrait_data.get("error"))
+                return
+
+            # Persist results
+            today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+            save_conversation_log(user_id, today, portrait_data)
+            update_user_profile(user_id, portrait_data)
+
+            # Reset session message count so the trigger can fire again after next N messages
+            start_user_session(user_id)
+
+            log.info("Portrait analysis completed for user_id=%s", user_id)
+
+        except Exception:
+            log.error("check_portrait_trigger background thread failed for user_id=%s",
+                      user_id, exc_info=True)
+
+    thread = threading.Thread(target=_run, daemon=True, name=f"portrait-{user_id}")
+    thread.start()
+    log.debug("check_portrait_trigger: background thread started for user_id=%s", user_id)
