@@ -148,7 +148,11 @@ class Memory:
 
     # --- Log summarization ---
 
-    def summarize_chat(self, entries: List[Dict[str, Any]]) -> str:
+    def summarize_chat(self, entries: List[Dict[str, Any]], user_id: Optional[int] = None) -> str:
+        if not entries:
+            return ""
+        if user_id is not None:
+            entries = [e for e in entries if e.get("user_id") == user_id]
         if not entries:
             return ""
         lines = []

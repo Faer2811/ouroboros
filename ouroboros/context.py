@@ -115,12 +115,13 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     return sections
 
 
-def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[str]:
+def _build_recent_sections(memory: Memory, env: Any, task_id: str = "", task_user_id: Optional[int] = None) -> List[str]:
     """Build recent chat, recent progress, recent tools, recent events sections."""
     sections = []
 
     chat_summary = memory.summarize_chat(
-        memory.read_jsonl_tail("chat.jsonl", 200))
+        memory.read_jsonl_tail("chat.jsonl", 200),
+        user_id=task_user_id)
     if chat_summary:
         sections.append("## Recent chat\n\n" + chat_summary)
 
@@ -354,7 +355,7 @@ def build_llm_messages(
     if health_section:
         dynamic_parts.append(health_section)
 
-    dynamic_parts.extend(_build_recent_sections(memory, env, task_id=task.get("id", "")))
+    dynamic_parts.extend(_build_recent_sections(memory, env, task_id=task.get("id", ""), task_user_id=task_user_id))
 
     if str(task.get("type") or "") == "review" and review_context_builder is not None:
         try:
