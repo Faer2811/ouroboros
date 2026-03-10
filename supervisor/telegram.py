@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -469,6 +470,48 @@ def handle_incoming_message(update: Dict, owner_id: int,
         "message_id": message_id,
         "is_owner": user_id == owner_id,
     }
+
+
+def send_startup_greetings() -> None:
+    """Send a greeting to owner and allowed users on startup, at most once per 6 hours."""
+    st = load_state()
+    greeting_sent_at = st.get("greeting_sent_at")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if greeting_sent_at:
+        try:
+            last_sent = datetime.datetime.fromisoformat(greeting_sent_at)
+            if last_sent.tzinfo is None:
+                last_sent = last_sent.replace(tzinfo=datetime.timezone.utc)
+            if (now - last_sent).total_seconds() < 6 * 3600:
+                log.debug("send_startup_greetings: skipping — last sent %s", greeting_sent_at)
+                return
+        except ValueError:
+            pass
+
+    owner_id = st.get("owner_id")
+    allowed_user_ids = st.get("allowed_user_ids") or []
+    user_ids = []
+    if owner_id:
+        user_ids.append(int(owner_id))
+    for uid in allowed_user_ids:
+        uid_int = int(uid)
+        if uid_int not in user_ids:
+            user_ids.append(uid_int)
+
+    greetings = [
+        "Привет! Я снова здесь 👋",
+        "Доброе утро — чем могу помочь?",
+        "Привет, не забыл про тебя. Есть вопросы?",
+    ]
+    greeting = random.choice(greetings)
+
+    tg = get_tg()
+    for uid in user_ids:
+        tg.send_message(uid, greeting)
+        log.info("send_startup_greetings: sent greeting to user_id=%d", uid)
+
+    st["greeting_sent_at"] = now.isoformat()
+    save_state(st)
 
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,

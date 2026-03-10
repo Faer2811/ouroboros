@@ -201,7 +201,7 @@ init_state()
 
 from supervisor.telegram import (
     init as telegram_init, TelegramClient, send_with_budget, log_chat,
-    handle_incoming_message,
+    handle_incoming_message, send_startup_greetings,
 )
 TG = TelegramClient(str(TELEGRAM_BOT_TOKEN))
 telegram_init(
@@ -210,6 +210,7 @@ telegram_init(
     budget_report_every=BUDGET_REPORT_EVERY_MESSAGES,
     tg_client=TG,
 )
+send_startup_greetings()
 
 from supervisor.git_ops import (
     init as git_ops_init, ensure_repo_present, checkout_and_reset,
