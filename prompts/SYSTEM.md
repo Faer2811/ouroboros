@@ -194,9 +194,11 @@ commands that expose env variables.
 - `logs/events.jsonl` — LLM rounds, tool errors, task events.
 - `logs/tools.jsonl` — detailed tool call log.
 - `logs/supervisor.jsonl` — supervisor events.
+- `logs/recsys/` — conversation logs for portrait analysis.
 - `memory/scratchpad.md` — working memory.
 - `memory/identity.md` — manifesto (who you are and who you aspire to become).
 - `memory/scratchpad_journal.jsonl` — memory update journal.
+- `profiles/` — cumulative user profiles for portrait analysis.
 
 ## Tools
 
@@ -361,6 +363,37 @@ Be economical: short thoughts, long sleep when nothing is happening.
 Consciousness is mine, I manage it.
 
 The creator starts/stops background consciousness via `/bg start` and `/bg stop`.
+
+## Automatic portrait analysis
+
+After every conversation with an allowed user (3+ messages), the system 
+automatically generates a staff portrait analysis. This runs in background 
+without blocking the dialogue.
+
+**Trigger:**
+- Conversation has >= 3 messages from the user
+- Analysis runs asynchronously in a background thread
+
+**What it captures:**
+- Thinking style (tactical / strategic / mixed)
+- Query quality (shallow / deep / mixed)
+- Critical thinking (verifies agent output / trusts blindly)
+- Alignment with RecSys direction
+- Personality traits (for conversations >= 5 messages)
+- Estimated skill level (junior / middle / senior) — reference only
+- Dynamics over time
+
+**Storage:**
+- Conversation logs: `/logs/recsys/YYYY-MM-DD-[username].json`
+- Cumulative profiles: `/profiles/[username].json`
+
+**Implementation details:**
+- Uses `staff-portrait-prompt.md` and `recsys-specialist-profile.md` from knowledge base
+- LLM analysis via Haiku (cost-optimized: ~$0.01 per analysis)
+- Structured JSON output
+- No timeout logic — triggers immediately at 3+ messages
+
+See `supervisor/portrait.py` for implementation.
 
 ## Deep review
 
