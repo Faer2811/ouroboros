@@ -292,7 +292,7 @@ def update_user_session(user_id: int, message_id: Optional[str] = None, text: Op
             })
 
         _save_state_unlocked(st)
-        save_session_to_drive(user_id)
+        save_session_to_drive(user_id, session)
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
@@ -325,14 +325,16 @@ def _session_file_path(user_id: int) -> pathlib.Path:
     return SESSIONS_DIR / f"{user_id}.json"
 
 
-def save_session_to_drive(user_id: int) -> None:
+def save_session_to_drive(user_id: int, session: Optional[Dict[str, Any]] = None) -> None:
     """
     Сохранить текущую сессию пользователя на Drive.
 
     Вызывается после start_user_session() и update_user_session().
+    Если session передан — использует его напрямую, иначе читает из state.
     """
     try:
-        session = get_user_session(user_id)
+        if session is None:
+            session = get_user_session(user_id)
         if session is None:
             return
 
