@@ -450,11 +450,12 @@ def handle_incoming_message(update: Dict, owner_id: int,
         return None
 
     # Track user session for portrait analysis (owner and allowed_users)
-    if user_id in allowed_user_ids or user_id == owner_id:
+    if user_id == owner_id or user_id in allowed_user_ids:
         session = get_user_session(user_id)
-        if session is None:
+        if not session:
             start_user_session(user_id)
-        update_user_session(user_id, message_id)
+        else:
+            update_user_session(user_id, message_id)
 
         # Check if portrait trigger needed; runs in background, doesn't block
         session = get_user_session(user_id)
