@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger(__name__)
 
 PORTRAIT_MODEL = "anthropic/claude-haiku-4-5-20251001"
+OBSERVATIONS_MODEL = "anthropic/claude-sonnet-4-6"
 
 # ---------------------------------------------------------------------------
 # Knowledge base helpers
@@ -63,6 +64,132 @@ def get_username(user_id: int) -> str:
         log.debug("Failed to load state for get_username(user_id=%s)", user_id, exc_info=True)
 
     return f"user_{user_id}"
+
+
+# ---------------------------------------------------------------------------
+# generate_observations
+# ---------------------------------------------------------------------------
+
+def generate_observations(
+    user_id: int,
+    messages: List[Dict[str, Any]],
+    message_count: int,
+) -> Dict[str, Any]:
+    """
+    Generate observations for a single conversation (not a full portrait).
+
+    Args:
+        user_id: Telegram user ID
+        messages: List of {"role": "user/assistant", "content": str, "timestamp": str}
+        message_count: Number of messages in this conversation
+
+    Returns:
+        Observations dict with structure from staff-portrait-prompt.md
+    """
+    from ouroboros.llm import LLMClient
+    from supervisor.state import DRIVE_ROOT
+
+    if not messages:
+        log.warning("generate_observations called with empty messages for user_id=%s", user_id)
+        return {"error": "no messages provided", "user_id": user_id}
+
+    # Load knowledge base files
+    portrait_prompt = _read_knowledge_file(DRIVE_ROOT, "staff-portrait-prompt.md")
+    specialist_profile = _read_knowledge_file(DRIVE_ROOT, "recsys-specialist-profile.md")
+
+    # Build system prompt focusing on observations only
+    system_parts = []
+    if portrait_prompt:
+        system_parts.append(portrait_prompt)
+        system_parts.append(
+            "\n\nВАЖНО: Это анализ ОДНОГО разговора. "
+            "Делай только наблюдения, НЕ строй портрет. "
+            "Возвращай только структуру observations из раздела 'Как сохранять'."
+        )
+    else:
+        system_parts.append(
+            "Analyze this single conversation and return observations only (not a full portrait).\n"
+            "Return JSON with structure: topics[], communication_notes, critical_thinking_moments[], "
+            "accepted_without_verification[], thinking_style, patterns_noticed[], conversation_quality, confidence."
+        )
+
+    if specialist_profile:
+        system_parts.append("\n\n---\n# RecSys Specialist Profile Reference\n\n" + specialist_profile)
+
+    system_text = "\n".join(system_parts)
+
+    # Format conversation
+    formatted_messages = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        ts = msg.get("timestamp", "")
+        ts_prefix = f"[{ts}] " if ts else ""
+        formatted_messages.append(f"{ts_prefix}{role.upper()}: {content}")
+
+    conversation_text = "\n\n".join(formatted_messages)
+
+    # Determine analysis level based on message count
+    if message_count < 10:
+        analysis_level = "базовые наблюдения (5-9 сообщений)"
+    else:
+        analysis_level = "расширенные наблюдения (10+ сообщений)"
+
+    user_message = (
+        f"Проанализируй разговор с user_id={user_id} ({message_count} сообщений).\n"
+        f"Уровень анализа: {analysis_level}\n\n"
+        f"Верни ТОЛЬКО валидный JSON структуры observations.\n"
+        f"БЕЗ markdown fences, БЕЗ объяснений.\n\n"
+        f"---\n# Разговор\n\n{conversation_text}"
+    )
+
+    # Build messages with prompt caching
+    llm_messages = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": user_message}],
+        }
+    ]
+
+    system_message = {
+        "role": "system",
+        "content": [
+            {
+                "type": "text",
+                "text": system_text,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+    }
+
+    all_messages = [system_message] + llm_messages
+
+    try:
+        client = LLMClient()
+        response_msg, usage = client.chat(
+            messages=all_messages,
+            model=OBSERVATIONS_MODEL,
+            max_tokens=2000,
+            reasoning_effort="none",
+        )
+        raw_content = response_msg.get("content") or ""
+
+        # Parse JSON
+        observations_data = _parse_json_response(raw_content)
+        observations_data["user_id"] = user_id
+        observations_data["message_count"] = message_count
+        observations_data["_model"] = OBSERVATIONS_MODEL
+        observations_data["_usage"] = {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "cached_tokens": usage.get("cached_tokens", 0),
+            "cost": usage.get("cost", 0),
+        }
+        return observations_data
+
+    except Exception:
+        log.error("generate_observations failed for user_id=%s", user_id, exc_info=True)
+        return {"error": "llm_call_failed", "user_id": user_id}
 
 
 # ---------------------------------------------------------------------------
