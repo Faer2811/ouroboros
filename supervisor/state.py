@@ -150,6 +150,7 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("evolution_consecutive_failures", 0)
     st.setdefault("allowed_user_ids", [])
     st.setdefault("user_sessions", {})
+    st.setdefault("user_message_queues", {})
     for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
                         "last_auto_review_at", "last_review_task_id", "session_daily_snapshot"):
         st.pop(legacy_key, None)
@@ -391,6 +392,79 @@ def delete_session_file(user_id: int) -> None:
             log.debug(f"Session file deleted: {session_path}")
     except Exception:
         log.warning(f"Failed to delete session file for user {user_id}", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Per-user message queues
+# ---------------------------------------------------------------------------
+
+def enqueue_user_message(user_id: int, message_data: Dict[str, Any]) -> None:
+    """
+    Добавить сообщение в очередь пользователя.
+
+    Args:
+        user_id: ID пользователя
+        message_data: Данные сообщения для обработки агентом
+    """
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        queues = st.setdefault("user_message_queues", {})
+        queue = queues.setdefault(str(user_id), [])
+        queue.append(message_data)
+        _save_state_unlocked(st)
+        log.debug(f"Enqueued message for user {user_id}, queue length: {len(queue)}")
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
+def dequeue_user_message(user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Взять следующее сообщение из очереди пользователя.
+
+    Returns:
+        Message data или None если очередь пуста
+    """
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        queues = st.get("user_message_queues", {})
+        queue = queues.get(str(user_id), [])
+
+        if not queue:
+            return None
+
+        message = queue.pop(0)
+        _save_state_unlocked(st)
+        log.debug(f"Dequeued message for user {user_id}, remaining: {len(queue)}")
+        return message
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
+def get_next_user_with_messages() -> Optional[int]:
+    """
+    Найти первого пользователя с непустой очередью сообщений.
+
+    Returns:
+        user_id или None если все очереди пусты
+    """
+    st = load_state()
+    queues = st.get("user_message_queues", {})
+
+    for user_id_str, queue in queues.items():
+        if queue:  # непустая очередь
+            return int(user_id_str)
+
+    return None
+
+
+def is_user_queue_empty(user_id: int) -> bool:
+    """Проверить пустая ли очередь пользователя."""
+    st = load_state()
+    queues = st.get("user_message_queues", {})
+    queue = queues.get(str(user_id), [])
+    return len(queue) == 0
 
 
 def init_state() -> Dict[str, Any]:
