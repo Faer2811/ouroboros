@@ -449,8 +449,8 @@ def handle_incoming_message(update: Dict, owner_id: int,
         log.debug("handle_incoming_message: blocked slash-command from user_id=%d", user_id)
         return None
 
-    # Track user session for portrait analysis (allowed_users only, not owner)
-    if user_id != owner_id:
+    # Track user session for portrait analysis (owner and allowed_users)
+    if user_id in allowed_user_ids or user_id == owner_id:
         session = get_user_session(user_id)
         if session is None:
             start_user_session(user_id)
