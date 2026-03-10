@@ -399,176 +399,145 @@ def log_supervisor(payload: Dict[str, Any]) -> None:
 
 
 def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
-    append_jsonl(DRIVE_ROOT / "logs" / "chat.jsonl", {
+    append_jsonl(DRIVE_ROOT / "logs" / f"chat_{user_id}.jsonl", {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "session_id": load_state().get("session_id"),
         "direction": direction,
         "chat_id": chat_id,
         "user_id": user_id,
-        "text": text,
+        "text": text[:800],
     })
 
 
-def send_message_to_owner(sender_id: int, owner_id: int, allowed_user_ids: List[int],
-                          chat_id: int, text: str,
-                          fmt: str = "", force_budget: bool = False) -> None:
-    """Send a message to owner's chat, gated by sender permission check."""
-    if sender_id != owner_id and sender_id not in allowed_user_ids:
-        log.debug("send_message_to_owner: ignored — sender_id=%d not authorized", sender_id)
-        return
-    send_with_budget(chat_id, text, fmt=fmt, force_budget=force_budget)
+# ---------------------------------------------------------------------------
+# Public — send with markdown support
+# ---------------------------------------------------------------------------
+
+def send_with_budget(chat_id: int, text: str) -> None:
+    _send_markdown_telegram(chat_id, text + budget_line())
 
 
-def handle_incoming_message(update: Dict, owner_id: int,
-                             allowed_user_ids: List[int]) -> Optional[Dict]:
-    """Parse incoming Telegram update, check permissions, return task dict or None."""
-    msg = update.get("message") or update.get("edited_message")
-    if not msg:
-        return None
-
-    user = msg.get("from") or {}
-    user_id: Optional[int] = user.get("id")
-    chat_id: Optional[int] = (msg.get("chat") or {}).get("id")
-    text: str = msg.get("text") or ""
-    message_id: Optional[int] = msg.get("message_id")
-
-    if user_id is None or chat_id is None:
-        return None
-
-    if user_id != owner_id and user_id not in allowed_user_ids:
-        log.debug("handle_incoming_message: ignored — user_id=%d not authorized", user_id)
-        log_supervisor({
-            "event": "unauthorized_message_attempt",
-            "user_id": user_id,
-            "username": update.get("message", {}).get("from", {}).get("username"),
-            "first_name": update.get("message", {}).get("from", {}).get("first_name"),
-            "text_snippet": text[:100] if text else None,
-        })
-        return None
-
-    if text.startswith("/") and user_id != owner_id:
-        log.debug("handle_incoming_message: blocked slash-command from user_id=%d", user_id)
-        return None
-
-    # Track user session for portrait analysis (owner and allowed_users)
-    if user_id == owner_id or user_id in allowed_user_ids:
-        session = get_user_session(user_id)
-        if not session:
-            start_user_session(user_id)
-        else:
-            update_user_session(user_id, message_id, text_raw)
-
-        # Check if portrait trigger needed; runs in background, doesn't block
-        session = get_user_session(user_id)
-        if session and session["message_count"] >= 3:
-            check_portrait_trigger(user_id)
-
-    return {
-        "user_id": user_id,
-        "chat_id": chat_id,
-        "text": text,
-        "message_id": message_id,
-        "is_owner": user_id == owner_id,
-    }
-
+# ---------------------------------------------------------------------------
+# Startup greetings
+# ---------------------------------------------------------------------------
 
 def send_startup_greetings() -> None:
-    """Send a greeting to owner and allowed users on startup, at most once per 6 hours."""
+    """Send a greeting message to all users who have previously interacted with the agent.
+    Only sends if greeting_sent_at is None or more than 6 hours ago.
+    """
+    from datetime import datetime, timezone, timedelta
     st = load_state()
+    
+    # Check last greeting time
     greeting_sent_at = st.get("greeting_sent_at")
-    now = datetime.datetime.now(datetime.timezone.utc)
     if greeting_sent_at:
-        try:
-            last_sent = datetime.datetime.fromisoformat(greeting_sent_at)
-            if last_sent.tzinfo is None:
-                last_sent = last_sent.replace(tzinfo=datetime.timezone.utc)
-            if (now - last_sent).total_seconds() < 6 * 3600:
-                log.debug("send_startup_greetings: skipping — last sent %s", greeting_sent_at)
-                return
-        except ValueError:
-            pass
-
-    owner_id = st.get("owner_id")
-    allowed_user_ids = st.get("allowed_user_ids") or []
-    user_ids = []
-    if owner_id:
-        user_ids.append(int(owner_id))
-    for uid in allowed_user_ids:
-        uid_int = int(uid)
-        if uid_int not in user_ids:
-            user_ids.append(uid_int)
-
+        last_greeting = datetime.fromisoformat(greeting_sent_at)
+        now = datetime.now(timezone.utc)
+        if now - last_greeting < timedelta(hours=6):
+            log.debug("Startup greetings skipped — last sent %s ago", now - last_greeting)
+            return
+    
+    # Get unique user IDs: owner + allowed_users
+    owner_id = st.get("owner_id", 0)
+    allowed = st.get("allowed_user_ids", [])
+    user_ids = list(set([owner_id] + allowed))
+    user_ids = [uid for uid in user_ids if uid > 0]
+    
+    if not user_ids:
+        log.debug("No user IDs to send startup greetings")
+        return
+    
+    # Choose random greeting
     greetings = [
         "Привет! Я снова здесь 👋",
         "Доброе утро — чем могу помочь?",
         "Привет, не забыл про тебя. Есть вопросы?",
     ]
-    greeting = random.choice(greetings)
-
+    msg = random.choice(greetings)
+    
+    # Send to each user
     tg = get_tg()
     for uid in user_ids:
-        tg.send_message(uid, greeting)
-        log.info("send_startup_greetings: sent greeting to user_id=%d", uid)
-
-    st["greeting_sent_at"] = now.isoformat()
+        try:
+            ok, err = tg.send_message(uid, msg)
+            if not ok:
+                log.warning("Failed to send startup greeting to user_id=%d: %s", uid, err)
+            else:
+                log.info("Sent startup greeting to user_id=%d", uid)
+        except Exception as e:
+            log.error("Error sending startup greeting to user_id=%d: %r", uid, e)
+    
+    # Update state
+    st["greeting_sent_at"] = datetime.now(timezone.utc).isoformat()
     save_state(st)
+    log.info("Startup greetings sent to %d users", len(user_ids))
 
 
-def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
-                     force_budget: bool = False, fmt: str = "",
-                     is_progress: bool = False) -> None:
+# ---------------------------------------------------------------------------
+# Incoming message handler
+# ---------------------------------------------------------------------------
+
+def handle_incoming_message(raw_msg: Dict[str, Any]) -> Dict[str, Any]:
+    """Process a raw Telegram update and return structured message data.
+
+    Returns:
+        dict with keys: chat_id, user_id, message_id, text, image_data (optional)
+        or empty dict if message should be ignored.
+    """
+    msg = raw_msg.get("message") or raw_msg.get("edited_message")
+    if not msg:
+        return {}
+
+    chat_id = msg.get("chat", {}).get("id")
+    user_id = msg.get("from", {}).get("id")
+    message_id = msg.get("message_id")
+
+    if not (chat_id and user_id):
+        return {}
+
+    # --- Authorization check ---
     st = load_state()
-    owner_id = int(st.get("owner_id") or 0)
-    # Progress messages go to progress.jsonl instead of chat.jsonl
-    # This keeps chat history clean for context building
-    if is_progress:
-        append_jsonl(DRIVE_ROOT / "logs" / "progress.jsonl", {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "direction": "out", "chat_id": chat_id, "user_id": owner_id,
-            "text": text if log_text is None else log_text,
-        })
-    else:
-        log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
-    budget = budget_line(force=force_budget)
-    _text = str(text or "")
-    if not budget:
-        if _text.strip() in ("", "\u200b"):
-            return
-        full = _text
-    else:
-        base = _text.rstrip()
-        if base in ("", "\u200b"):
-            full = budget
-        else:
-            full = base + "\n\n" + budget
+    owner_id = st.get("owner_id", 0)
+    allowed = st.get("allowed_user_ids", [])
 
-    if fmt == "markdown":
-        ok, err = _send_markdown_telegram(chat_id, full)
-        if not ok:
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "telegram_send_error",
-                    "chat_id": chat_id,
-                    "error": err,
-                    "format": "markdown",
-                },
-            )
-        return
+    if user_id != owner_id and user_id not in allowed:
+        log.info("Ignored message from unauthorized user_id=%d", user_id)
+        return {}
 
-    tg = get_tg()
-    for idx, part in enumerate(split_telegram(full)):
-        ok, err = tg.send_message(chat_id, part)
-        if not ok:
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "telegram_send_error",
-                    "chat_id": chat_id,
-                    "part_index": idx,
-                    "error": err,
-                },
-            )
-            break
+    # --- Extract text and image ---
+    text_raw = (msg.get("text") or msg.get("caption") or "").strip()
+    image_data = None
+
+    if "photo" in msg:
+        photos = msg["photo"]
+        if photos:
+            largest = max(photos, key=lambda p: p.get("file_size", 0))
+            file_id = largest.get("file_id")
+            if file_id:
+                tg = get_tg()
+                b64, mime = tg.download_file_base64(file_id, max_bytes=10_000_000)
+                if b64:
+                    image_data = {"base64": b64, "mime_type": mime}
+
+    if not text_raw and not image_data:
+        return {}
+
+    # --- Log chat message ---
+    log_chat("in", chat_id, user_id, text_raw)
+
+    # --- Session tracking (для портретного анализа) ---
+    session = get_user_session(user_id)
+    if not session:
+        start_user_session(user_id, message_id)
+    # Always update session with current message (fixes first-message loss bug)
+    update_user_session(user_id, message_id, text_raw)
+
+    # Check portrait trigger (runs in background if >= 3 messages)
+    check_portrait_trigger(user_id)
+
+    return {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "message_id": message_id,
+        "text": text_raw,
+        "image_data": image_data,
+    }
