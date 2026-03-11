@@ -447,18 +447,29 @@ def update_user_profile(user_id: int, new_portrait: Dict[str, Any]) -> None:
 
 def check_portrait_trigger(user_id: int) -> None:
     """
-    Trigger portrait analysis for user_id in a background daemon thread (non-blocking).
+    Запускает анализ по порогам количества сообщений в отдельном потоке.
 
-    Reads recent inbound messages from chat.jsonl, generates a portrait via LLM,
-    saves the conversation log and updates the user profile. After completion,
-    resets the session message counter so the trigger can fire again.
+    Пороги:
+      - <5 сообщений: ничего не делаем
+      - >=5: базовые наблюдения (generate_observations, один раз за сессию)
+      - >=10: полный анализ разговора (generate_observations, один раз за сессию)
+      - >=15: preliminary-портрет (generate_portrait, один раз за сессию)
+      - >=40: full-портрет, затем обновление каждые +20 сообщений
     """
     import threading
 
     def _run() -> None:
         try:
             log.info("Portrait analysis thread started for user_id=%s", user_id)
-            from supervisor.state import DRIVE_ROOT, start_user_session
+            from supervisor.state import (
+                DRIVE_ROOT,
+                get_user_session,
+                acquire_file_lock,
+                release_file_lock,
+                STATE_LOCK_PATH,
+                _load_state_unlocked,
+                _save_state_unlocked,
+            )
             import datetime
 
             # Read inbound messages for this user from chat.jsonl
@@ -487,7 +498,69 @@ def check_portrait_trigger(user_id: int) -> None:
                 log.debug("check_portrait_trigger: no messages found for user_id=%s", user_id)
                 return
 
-            # Load previous profile for dynamics tracking
+            # Текущее состояние сессии (счётчик сообщений и стадия анализа)
+            session = get_user_session(user_id)
+            if session is not None:
+                try:
+                    message_count = int(session.get("message_count") or len(session.get("messages", [])))
+                except Exception:
+                    message_count = len(session.get("messages", [])) or len(messages)
+                try:
+                    portrait_stage = int(session.get("portrait_stage") or 0)
+                except Exception:
+                    portrait_stage = 0
+                last_full_at = session.get("last_full_portrait_message_count")
+                if isinstance(last_full_at, str):
+                    try:
+                        last_full_at = int(last_full_at)
+                    except Exception:
+                        last_full_at = None
+                if not isinstance(last_full_at, int):
+                    last_full_at = None
+            else:
+                message_count = len(messages)
+                portrait_stage = 0
+                last_full_at = None
+
+            if message_count < 5:
+                log.debug("check_portrait_trigger: message_count=%s < 5, skipping", message_count)
+                return
+
+            # Дата разговора по последнему сообщению (общая для всех сохранений)
+            if messages:
+                last_ts = messages[-1].get("timestamp", "")
+                try:
+                    dt = datetime.datetime.fromisoformat(last_ts.replace("+00:00", "+00:00"))
+                    conversation_date = dt.strftime("%Y-%m-%d")
+                except Exception:
+                    conversation_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+            else:
+                conversation_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+            new_stage = portrait_stage
+            new_last_full_at = last_full_at
+
+            # --- >=5: базовые наблюдения (один раз за сессию) ---
+            if message_count >= 5 and portrait_stage < 1:
+                obs = generate_observations(user_id, messages, message_count)
+                if "error" in obs:
+                    log.warning("Basic observations failed for user_id=%s: %s",
+                                user_id, obs.get("error"))
+                else:
+                    save_conversation_log(user_id, conversation_date, obs)
+                    new_stage = max(new_stage, 1)
+
+            # --- >=10: полный анализ (один раз за сессию) ---
+            if message_count >= 10 and portrait_stage < 2:
+                obs_full = generate_observations(user_id, messages, message_count)
+                if "error" in obs_full:
+                    log.warning("Full observations failed for user_id=%s: %s",
+                                user_id, obs_full.get("error"))
+                else:
+                    save_conversation_log(user_id, conversation_date, obs_full)
+                    new_stage = max(new_stage, 2)
+
+            # Подготовим предыдущий профиль для портретов
             username = get_username(user_id)
             profile_path = DRIVE_ROOT / "profiles" / f"{username}.json"
             previous_profile: Optional[Dict[str, Any]] = None
@@ -497,44 +570,57 @@ def check_portrait_trigger(user_id: int) -> None:
                 except Exception:
                     log.debug("Failed to load previous profile for user_id=%s", user_id, exc_info=True)
 
-            # Generate portrait via LLM
-            portrait_data = generate_portrait(user_id, messages, previous_profile)
+            # --- >=15 и <40: preliminary-портрет (один раз за сессию) ---
+            if 15 <= message_count < 40 and portrait_stage < 3:
+                portrait_data = generate_portrait(user_id, messages, previous_profile)
+                if "error" in portrait_data:
+                    log.warning("Preliminary portrait generation failed for user_id=%s: %s",
+                                user_id, portrait_data.get("error"))
+                else:
+                    portrait_data.setdefault("portrait_kind", "preliminary")
+                    save_conversation_log(user_id, conversation_date, portrait_data)
+                    update_user_profile(user_id, portrait_data)
+                    new_stage = max(new_stage, 3)
 
-            if "error" in portrait_data:
-                log.warning("Portrait generation returned error for user_id=%s: %s",
-                            user_id, portrait_data.get("error"))
-                return
+            # --- >=40: full-портрет + обновление каждые +20 сообщений ---
+            should_run_full = False
+            if message_count >= 40:
+                if last_full_at is None:
+                    should_run_full = True
+                else:
+                    if (message_count - last_full_at) >= 20:
+                        should_run_full = True
 
-            # Persist results
-            # Use date of last message in conversation (not current date)
-            # to handle delayed background analysis correctly
-            if messages:
-                last_ts = messages[-1].get("timestamp", "")
-                try:
-                    # Parse ISO timestamp: "2026-03-10T15:13:31.698813+00:00"
-                    dt = datetime.datetime.fromisoformat(last_ts.replace("+00:00", "+00:00"))
-                    conversation_date = dt.strftime("%Y-%m-%d")
-                except Exception:
-                    # Fallback to current date if parsing fails
-                    conversation_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-            else:
-                conversation_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-            save_conversation_log(user_id, conversation_date, portrait_data)
-            update_user_profile(user_id, portrait_data)
+            if should_run_full:
+                full_portrait = generate_portrait(user_id, messages, previous_profile)
+                if "error" in full_portrait:
+                    log.warning("Full portrait generation failed for user_id=%s: %s",
+                                user_id, full_portrait.get("error"))
+                else:
+                    full_portrait.setdefault("portrait_kind", "full")
+                    save_conversation_log(user_id, conversation_date, full_portrait)
+                    update_user_profile(user_id, full_portrait)
+                    new_stage = max(new_stage, 4)
+                    new_last_full_at = message_count
 
-            # Reset session message count (keep messages history for next analysis)
-            from supervisor.state import acquire_file_lock, release_file_lock, STATE_LOCK_PATH, _load_state_unlocked, _save_state_unlocked
+            # Обновляем метаданные сессии (но не обнуляем message_count)
             lock_fd = acquire_file_lock(STATE_LOCK_PATH)
             try:
                 st = _load_state_unlocked()
                 sessions = st.setdefault("user_sessions", {})
-                if str(user_id) in sessions:
-                    sessions[str(user_id)]["message_count"] = 0
+                sess = sessions.get(str(user_id))
+                if sess is not None:
+                    sess["message_count"] = message_count
+                    if new_stage != portrait_stage:
+                        sess["portrait_stage"] = new_stage
+                    if new_last_full_at is not None:
+                        sess["last_full_portrait_message_count"] = new_last_full_at
                     _save_state_unlocked(st)
             finally:
                 release_file_lock(STATE_LOCK_PATH, lock_fd)
 
-            log.info("Portrait analysis completed for user_id=%s", user_id)
+            log.info("Portrait analysis completed for user_id=%s (messages=%s, stage=%s)",
+                     user_id, message_count, new_stage)
 
         except Exception:
             log.error("check_portrait_trigger background thread failed for user_id=%s",
