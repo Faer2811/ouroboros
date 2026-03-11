@@ -66,13 +66,11 @@ def _handle_typing_start(evt: Dict[str, Any], ctx: Any) -> None:
 
 def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
     try:
-        log_text = evt.get("log_text")
         fmt = str(evt.get("format") or "")
         is_progress = bool(evt.get("is_progress"))
         ctx.send_with_budget(
             int(evt["chat_id"]),
             str(evt.get("text") or ""),
-            log_text=(str(log_text) if isinstance(log_text, str) else None),
             fmt=fmt,
             is_progress=is_progress,
         )
