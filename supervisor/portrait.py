@@ -462,7 +462,7 @@ def check_portrait_trigger(user_id: int) -> None:
             import datetime
 
             # Read inbound messages for this user from chat.jsonl
-            chat_log_path = DRIVE_ROOT / "logs" / "chat.jsonl"
+            chat_log_path = DRIVE_ROOT / "logs" / f"chat_{user_id}.jsonl"
             messages: List[Dict[str, Any]] = []
             if chat_log_path.exists():
                 with open(chat_log_path, "r", encoding="utf-8") as f:
@@ -510,8 +510,17 @@ def check_portrait_trigger(user_id: int) -> None:
             save_conversation_log(user_id, today, portrait_data)
             update_user_profile(user_id, portrait_data)
 
-            # Reset session message count so the trigger can fire again after next N messages
-            start_user_session(user_id)
+            # Reset session message count (keep messages history for next analysis)
+            from supervisor.state import acquire_file_lock, release_file_lock, STATE_LOCK_PATH, _load_state_unlocked, _save_state_unlocked
+            lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+            try:
+                st = _load_state_unlocked()
+                sessions = st.setdefault("user_sessions", {})
+                if str(user_id) in sessions:
+                    sessions[str(user_id)]["message_count"] = 0
+                    _save_state_unlocked(st)
+            finally:
+                release_file_lock(STATE_LOCK_PATH, lock_fd)
 
             log.info("Portrait analysis completed for user_id=%s", user_id)
 
