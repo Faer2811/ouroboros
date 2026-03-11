@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
-PORTRAIT_MODEL = "anthropic/claude-haiku-4-5-20251001"
+PORTRAIT_MODEL = "anthropic/claude-haiku-4-5"
 OBSERVATIONS_MODEL = "anthropic/claude-sonnet-4-6"
 
 # ---------------------------------------------------------------------------
