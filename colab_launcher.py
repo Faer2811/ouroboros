@@ -462,7 +462,7 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
     # Dual-path commands: supervisor handles + LLM sees a note
     if lowered.startswith("/status"):
         status = status_text(WORKERS, PENDING, RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
-        send_with_budget(chat_id, status, force_budget=True)
+        send_with_budget(chat_id, status)
         return "[Supervisor handled /status — status text already sent to chat]\n"
 
     if lowered.startswith("/review"):

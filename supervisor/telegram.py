@@ -353,6 +353,19 @@ def _chunk_markdown_for_telegram(md: str, max_chars: int = 3500) -> List[str]:
 
 def _send_markdown_telegram(chat_id: int, text: str) -> Tuple[bool, str]:
     """Send markdown text as Telegram HTML, with plain-text fallback."""
+    # Защита от некорректных kwargs (проверка что функция вызвана только с chat_id и text)
+    import inspect
+    frame = inspect.currentframe()
+    if frame and frame.f_back:
+        args_info = inspect.getargvalues(frame.f_back)
+        local_vars = args_info.locals
+        # Проверяем что нет лишних именованных аргументов
+        valid_params = {'chat_id', 'text', 'self'}  # self на случай если станет методом класса
+        passed_kwargs = {k for k in local_vars.keys() if not k.startswith('_')}
+        invalid = passed_kwargs - valid_params
+        if invalid:
+            log.error(f"_send_markdown_telegram called with invalid kwargs: {invalid}")
+            raise TypeError(f"_send_markdown_telegram() got unexpected keyword argument(s): {invalid}")
     tg = get_tg()
     chunks = _chunk_markdown_for_telegram(text or "", max_chars=3200)
     chunks = [c for c in chunks if isinstance(c, str) and c.strip()]
