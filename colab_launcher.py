@@ -573,8 +573,7 @@ while True:
             send_with_budget(_reg_chat_id, "✅ Owner registered. Ouroboros online.")
             continue
 
-        parsed = handle_incoming_message(upd),
-        )
+        parsed = handle_incoming_message(upd)
         if parsed is None:
             continue  # ignore — unauthorized user or blocked command
 
