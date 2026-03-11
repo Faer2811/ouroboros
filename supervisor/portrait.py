@@ -502,9 +502,9 @@ def check_portrait_trigger(user_id: int) -> None:
             session = get_user_session(user_id)
             if session is not None:
                 try:
-                    message_count = int(session.get("message_count") or len(session.get("messages", [])))
+                    message_count = len(messages)
                 except Exception:
-                    message_count = len(session.get("messages", [])) or len(messages)
+                    message_count = len(messages)
                 try:
                     portrait_stage = int(session.get("portrait_stage") or 0)
                 except Exception:
