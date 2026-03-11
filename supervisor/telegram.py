@@ -537,7 +537,8 @@ def handle_incoming_message(raw_msg: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "chat_id": chat_id,
         "user_id": user_id,
-        "message_id": message_id,
+        "user_id": user_id,
+        "is_owner": (user_id == owner_id),
         "text": text_raw,
         "image_data": image_data,
     }
