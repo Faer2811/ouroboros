@@ -527,7 +527,7 @@ def handle_incoming_message(raw_msg: Dict[str, Any]) -> Dict[str, Any]:
     # --- Session tracking (для портретного анализа) ---
     session = get_user_session(user_id)
     if not session:
-        start_user_session(user_id, message_id)
+        start_user_session(user_id)
     # Always update session with current message (fixes first-message loss bug)
     update_user_session(user_id, message_id, text_raw)
 
