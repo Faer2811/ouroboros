@@ -337,7 +337,7 @@ def generate_portrait(
         response_msg, usage = client.chat(
             messages=all_messages,
             model=PORTRAIT_MODEL,
-            max_tokens=1500,
+            max_tokens=4000,
             reasoning_effort="none",
         )
         raw_content = response_msg.get("content") or ""
