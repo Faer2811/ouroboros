@@ -506,8 +506,20 @@ def check_portrait_trigger(user_id: int) -> None:
                 return
 
             # Persist results
-            today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-            save_conversation_log(user_id, today, portrait_data)
+            # Use date of last message in conversation (not current date)
+            # to handle delayed background analysis correctly
+            if messages:
+                last_ts = messages[-1].get("timestamp", "")
+                try:
+                    # Parse ISO timestamp: "2026-03-10T15:13:31.698813+00:00"
+                    dt = datetime.datetime.fromisoformat(last_ts.replace("+00:00", "+00:00"))
+                    conversation_date = dt.strftime("%Y-%m-%d")
+                except Exception:
+                    # Fallback to current date if parsing fails
+                    conversation_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+            else:
+                conversation_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+            save_conversation_log(user_id, conversation_date, portrait_data)
             update_user_profile(user_id, portrait_data)
 
             # Reset session message count (keep messages history for next analysis)
