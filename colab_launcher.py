@@ -530,6 +530,21 @@ while True:
     enforce_task_timeouts()
     enqueue_evolution_task_if_needed()
     assign_tasks()
+
+    # Process per-user message queues (round-robin after each loop cycle)
+    from supervisor.state import get_next_user_with_messages, dequeue_user_message
+
+    user_id_with_message = get_next_user_with_messages()
+    if user_id_with_message:
+        msg_data = dequeue_user_message(user_id_with_message)
+        if msg_data:
+            # Dispatch message via direct chat handler
+            handle_chat_direct(
+                msg_data["chat_id"],
+                msg_data["text"],
+                msg_data.get("image_data")
+            )
+
     persist_queue_snapshot(reason="main_loop")
 
     _now = time.time()
