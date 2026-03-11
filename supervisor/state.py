@@ -278,18 +278,23 @@ def update_user_session(user_id: int, message_id: Optional[str] = None, text: Op
             }
             sessions[str(user_id)] = session
 
-        # Обновить timestamp и счётчик
+        # Обновить timestamp
         session["last_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        session["message_count"] = session.get("message_count", 0) + 1
 
-        # Добавить сообщение если передан message_id (text опционален)
+        # Добавить сообщение если передан message_id (с дедупликацией)
         if message_id:
             messages = session.setdefault("messages", [])
-            messages.append({
-                "id": message_id,
-                "text": text or "",  # Пустая строка если текста нет
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
-            })
+            # Проверить нет ли уже этого message_id
+            existing_ids = {msg.get("id") for msg in messages}
+            if message_id not in existing_ids:
+                messages.append({
+                    "id": message_id,
+                    "text": text or "",  # Пустая строка если текста нет
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                })
+
+        # Синхронизировать message_count с реальной длиной массива
+        session["message_count"] = len(session.get("messages", []))
 
         _save_state_unlocked(st)
         save_session_to_drive(user_id, session)
