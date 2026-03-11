@@ -282,12 +282,12 @@ def update_user_session(user_id: int, message_id: Optional[str] = None, text: Op
         session["last_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         session["message_count"] = session.get("message_count", 0) + 1
 
-        # Добавить сообщение если передан message_id и text
-        if message_id and text:
+        # Добавить сообщение если передан message_id (text опционален)
+        if message_id:
             messages = session.setdefault("messages", [])
             messages.append({
                 "id": message_id,
-                "text": text,
+                "text": text or "",  # Пустая строка если текста нет
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
             })
 
