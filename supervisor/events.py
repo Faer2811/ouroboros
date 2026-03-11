@@ -66,13 +66,9 @@ def _handle_typing_start(evt: Dict[str, Any], ctx: Any) -> None:
 
 def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
     try:
-        fmt = str(evt.get("format") or "")
-        is_progress = bool(evt.get("is_progress"))
         ctx.send_with_budget(
             int(evt["chat_id"]),
             str(evt.get("text") or ""),
-            fmt=fmt,
-            is_progress=is_progress,
         )
     except Exception as e:
         ctx.append_jsonl(
