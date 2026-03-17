@@ -50,16 +50,19 @@ install_apply_patch()
 # ----------------------------
 # 1) Secrets + runtime config
 # ----------------------------
-from google.colab import userdata  # type: ignore
-from google.colab import drive  # type: ignore
+try:
+    from google.colab import userdata  # type: ignore
+    from google.colab import drive  # type: ignore
+    _IN_COLAB = True
+except ModuleNotFoundError:
+    _IN_COLAB = False
 
 _LEGACY_CFG_WARNED: Set[str] = set()
 
 def _userdata_get(name: str) -> Optional[str]:
-    try:
+    if _IN_COLAB:
         return userdata.get(name)
-    except Exception:
-        return None
+    return os.environ.get(name)
 
 def get_secret(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
     v = _userdata_get(name)
@@ -153,7 +156,8 @@ if str(ANTHROPIC_API_KEY or "").strip():
 # 2) Mount Drive
 # ----------------------------
 if not pathlib.Path("/content/drive/MyDrive").exists():
-    drive.mount("/content/drive")
+    if _IN_COLAB:
+        drive.mount("/content/drive")
 
 DRIVE_ROOT = pathlib.Path(os.environ.get("DRIVE_ROOT", "/content/drive/MyDrive/Ouroboros")).resolve()
 REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
