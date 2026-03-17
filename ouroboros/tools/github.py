@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import subprocess
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -16,45 +19,47 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None) -> str:
-    """Run `gh` CLI command and return stdout or error string."""
-    cmd = ["gh"] + args
+def _api(method: str, path: str, data: Optional[Dict[str, Any]] = None) -> Any:
+    """Call the GitHub REST API and return parsed JSON."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    url = f"https://api.github.com{path}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
+    }
+    body = json.dumps(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        res = subprocess.run(
-            cmd,
-            cwd=str(ctx.repo_dir),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            input=input_data,
-        )
-        if res.returncode != 0:
-            err = (res.stderr or "").strip()
-            # Only return first line of stderr, truncated to 200 chars for security
-            return f"⚠️ GH_ERROR: {err.split(chr(10))[0][:200]}"
-        return res.stdout.strip()
-    except FileNotFoundError:
-        return "⚠️ GH_ERROR: `gh` CLI not found."
-    except subprocess.TimeoutExpired:
-        return f"⚠️ GH_TIMEOUT: exceeded {timeout}s."
-    except Exception as e:
-        return f"⚠️ GH_ERROR: {e}"
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            message = json.loads(e.read().decode()).get("message", e.reason)
+        except Exception:
+            message = e.reason
+        return {"error": f"{e.code}: {message}"}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 def _get_repo_slug(ctx: ToolContext) -> str:
-    """Get 'owner/repo' from git remote."""
+    """Get 'owner/repo' by parsing .git/config for the origin remote URL."""
     try:
-        res = subprocess.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            cwd=str(ctx.repo_dir),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip()
+        git_config = os.path.join(str(ctx.repo_dir), ".git", "config")
+        with open(git_config, "r", encoding="utf-8") as f:
+            content = f.read()
+        # Find the [remote "origin"] section and extract its url
+        m = re.search(r'\[remote "origin"\][^\[]*url\s*=\s*(\S+)', content, re.DOTALL)
+        if m:
+            remote_url = m.group(1)
+            # Match both https (github.com/owner/repo) and ssh (github.com:owner/repo)
+            slug_m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", remote_url)
+            if slug_m:
+                return slug_m.group(1)
     except Exception:
-        log.debug("Failed to get repo slug from gh", exc_info=True)
+        log.debug("Failed to get repo slug from .git/config", exc_info=True)
     user = os.environ.get("GITHUB_USER", "")
     repo = os.environ.get("GITHUB_REPO", "")
     return f"{user}/{repo}"
@@ -66,39 +71,31 @@ def _get_repo_slug(ctx: ToolContext) -> str:
 
 def _list_issues(ctx: ToolContext, state: str = "open", labels: str = "", limit: int = 20) -> str:
     """List GitHub issues with optional filters."""
-    args = [
-        "issue", "list",
-        "--state", state,
-        "--limit", str(min(limit, 50)),
-        "--json", "number,title,body,labels,createdAt,author,assignees,state",
-    ]
+    slug = _get_repo_slug(ctx)
+    per_page = min(limit, 50)
+    path = f"/repos/{slug}/issues?state={state}&per_page={per_page}"
     if labels:
-        args.extend(["--label", labels])
+        path += f"&labels={urllib.parse.quote(labels)}"
 
-    raw = _gh_cmd(args, ctx)
-    if raw.startswith("⚠️"):
-        return raw
+    result = _api("GET", path)
+    if isinstance(result, dict) and "error" in result:
+        return f"⚠️ GH_ERROR: {result['error']}"
+    if not isinstance(result, list):
+        return f"⚠️ Unexpected response: {str(result)[:500]}"
 
-    try:
-        issues = json.loads(raw)
-    except json.JSONDecodeError:
-        return f"⚠️ Failed to parse issues JSON: {raw[:500]}"
-
+    issues = result
     if not issues:
         return f"No {state} issues found."
 
     lines = [f"**{len(issues)} {state} issue(s):**\n"]
     for issue in issues:
-        labels_str = ", ".join(l.get("name", "") for l in issue.get("labels", []))
-        author = issue.get("author", {}).get("login", "unknown")
-        lines.append(
-            f"- **#{issue['number']}** {issue['title']}"
-            f" (by @{author}{', labels: ' + labels_str if labels_str else ''})"
-        )
-        body = (issue.get("body") or "").strip()
-        if body:
-            # Show first 200 chars of body
-            preview = body[:200] + ("..." if len(body) > 200 else "")
+        labels_str = ", ".join(lbl.get("name", "") for lbl in issue.get("labels", []))
+        author = (issue.get("user") or {}).get("login", "unknown")
+        suffix = (", labels: " + labels_str) if labels_str else ""
+        lines.append(f"- **#{issue['number']}** {issue['title']} (by @{author}{suffix})")
+        body_text = (issue.get("body") or "").strip()
+        if body_text:
+            preview = body_text[:200] + ("..." if len(body_text) > 200 else "")
             lines.append(f"  > {preview}")
 
     return "\n".join(lines)
@@ -109,22 +106,14 @@ def _get_issue(ctx: ToolContext, number: int) -> str:
     if number <= 0:
         return "⚠️ issue number must be positive"
 
-    args = [
-        "issue", "view", str(number),
-        "--json", "number,title,body,labels,createdAt,author,assignees,state,comments",
-    ]
+    slug = _get_repo_slug(ctx)
 
-    raw = _gh_cmd(args, ctx)
-    if raw.startswith("⚠️"):
-        return raw
+    issue = _api("GET", f"/repos/{slug}/issues/{number}")
+    if isinstance(issue, dict) and "error" in issue:
+        return f"⚠️ GH_ERROR: {issue['error']}"
 
-    try:
-        issue = json.loads(raw)
-    except json.JSONDecodeError:
-        return f"⚠️ Failed to parse issue JSON: {raw[:500]}"
-
-    labels_str = ", ".join(l.get("name", "") for l in issue.get("labels", []))
-    author = issue.get("author", {}).get("login", "unknown")
+    labels_str = ", ".join(lbl.get("name", "") for lbl in issue.get("labels", []))
+    author = (issue.get("user") or {}).get("login", "unknown")
 
     lines = [
         f"## Issue #{issue['number']}: {issue['title']}",
@@ -133,15 +122,15 @@ def _get_issue(ctx: ToolContext, number: int) -> str:
     if labels_str:
         lines.append(f"**Labels:** {labels_str}")
 
-    body = (issue.get("body") or "").strip()
-    if body:
-        lines.append(f"\n**Body:**\n{body[:3000]}")
+    body_text = (issue.get("body") or "").strip()
+    if body_text:
+        lines.append(f"\n**Body:**\n{body_text[:3000]}")
 
-    comments = issue.get("comments", [])
-    if comments:
-        lines.append(f"\n**Comments ({len(comments)}):**")
-        for c in comments[:10]:  # limit to 10 most recent
-            c_author = c.get("author", {}).get("login", "unknown")
+    comments_data = _api("GET", f"/repos/{slug}/issues/{number}/comments")
+    if isinstance(comments_data, list) and comments_data:
+        lines.append(f"\n**Comments ({len(comments_data)}):**")
+        for c in comments_data[:10]:
+            c_author = (c.get("user") or {}).get("login", "unknown")
             c_body = (c.get("body") or "").strip()[:500]
             lines.append(f"\n@{c_author}:\n{c_body}")
 
@@ -152,15 +141,13 @@ def _comment_on_issue(ctx: ToolContext, number: int, body: str) -> str:
     """Add a comment to an issue."""
     if number <= 0:
         return "⚠️ issue number must be positive"
-
     if not body or not body.strip():
         return "⚠️ Comment body cannot be empty."
 
-    # Pass body via stdin to prevent argument injection
-    args = ["issue", "comment", str(number), "--body-file", "-"]
-    raw = _gh_cmd(args, ctx, input_data=body)
-    if raw.startswith("⚠️"):
-        return raw
+    slug = _get_repo_slug(ctx)
+    result = _api("POST", f"/repos/{slug}/issues/{number}/comments", {"body": body})
+    if isinstance(result, dict) and "error" in result:
+        return f"⚠️ GH_ERROR: {result['error']}"
     return f"✅ Comment added to issue #{number}."
 
 
@@ -170,15 +157,14 @@ def _close_issue(ctx: ToolContext, number: int, comment: str = "") -> str:
         return "⚠️ issue number must be positive"
 
     if comment and comment.strip():
-        # Add comment first
-        result = _comment_on_issue(ctx, number, comment)
-        if result.startswith("⚠️"):
-            return result
+        res = _comment_on_issue(ctx, number, comment)
+        if res.startswith("⚠️"):
+            return res
 
-    args = ["issue", "close", str(number)]
-    raw = _gh_cmd(args, ctx)
-    if raw.startswith("⚠️"):
-        return raw
+    slug = _get_repo_slug(ctx)
+    result = _api("PATCH", f"/repos/{slug}/issues/{number}", {"state": "closed"})
+    if isinstance(result, dict) and "error" in result:
+        return f"⚠️ GH_ERROR: {result['error']}"
     return f"✅ Issue #{number} closed."
 
 
@@ -187,29 +173,14 @@ def _create_issue(ctx: ToolContext, title: str, body: str = "", labels: str = ""
     if not title or not title.strip():
         return "⚠️ Issue title cannot be empty."
 
-    # Use --flag=value form to prevent argument injection
-    args = ["issue", "create", f"--title={title}"]
-    if body:
-        # Pass body via stdin to prevent argument injection
-        args.append("--body-file=-")
-        raw = _gh_cmd(args, ctx, input_data=body)
-    else:
-        raw = _gh_cmd(args, ctx)
-
-    if labels:
-        # For existing issue, add labels separately
-        if not raw.startswith("⚠️"):
-            # Extract issue number from URL in raw output
-            import re
-            match = re.search(r'/issues/(\d+)', raw)
-            if match:
-                issue_num = int(match.group(1))
-                label_args = ["issue", "edit", str(issue_num), f"--add-label={labels}"]
-                _gh_cmd(label_args, ctx)
-
-    if raw.startswith("⚠️"):
-        return raw
-    return f"✅ Issue created: {raw}"
+    slug = _get_repo_slug(ctx)
+    label_list = [lbl.strip() for lbl in labels.split(",") if lbl.strip()] if labels else []
+    payload: Dict[str, Any] = {"title": title, "body": body, "labels": label_list}
+    result = _api("POST", f"/repos/{slug}/issues", payload)
+    if isinstance(result, dict) and "error" in result:
+        return f"⚠️ GH_ERROR: {result['error']}"
+    url = result.get("html_url") or ("#" + str(result.get("number", "?")))
+    return f"✅ Issue created: {url}"
 
 
 # ---------------------------------------------------------------------------
