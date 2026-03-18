@@ -538,11 +538,9 @@ def check_portrait_trigger(user_id: int) -> None:
 
             # Текущее состояние сессии (счётчик сообщений и стадия анализа)
             session = get_user_session(user_id)
+            message_count = len(messages)
+
             if session is not None:
-                try:
-                    message_count = len(messages)
-                except Exception:
-                    message_count = len(messages)
                 try:
                     portrait_stage = int(session.get("portrait_stage") or 0)
                 except Exception:
@@ -556,9 +554,32 @@ def check_portrait_trigger(user_id: int) -> None:
                 if not isinstance(last_full_at, int):
                     last_full_at = None
             else:
-                message_count = len(messages)
+                # Fallback: читаем portrait_stage из Drive-файла сессии
                 portrait_stage = 0
                 last_full_at = None
+                try:
+                    drive_session_path = DRIVE_ROOT / "sessions" / f"{user_id}.json"
+                    if drive_session_path.exists():
+                        drive_session_data = json.loads(drive_session_path.read_text(encoding="utf-8"))
+                        if isinstance(drive_session_data, dict):
+                            session = drive_session_data
+                            try:
+                                portrait_stage = int(drive_session_data.get("portrait_stage") or 0)
+                            except Exception:
+                                portrait_stage = 0
+                            lf = drive_session_data.get("last_full_portrait_message_count")
+                            if isinstance(lf, int):
+                                last_full_at = lf
+                            elif isinstance(lf, str):
+                                try:
+                                    last_full_at = int(lf)
+                                except Exception:
+                                    pass
+                            log.debug("Restored portrait_stage=%s from Drive session for user_id=%s",
+                                      portrait_stage, user_id)
+                except Exception:
+                    log.debug("Failed to read Drive session for portrait_stage fallback, user_id=%s",
+                              user_id, exc_info=True)
 
             if message_count < 3:
                 log.debug("check_portrait_trigger: message_count=%s < 3, skipping", message_count)
@@ -579,45 +600,31 @@ def check_portrait_trigger(user_id: int) -> None:
             new_last_full_at = last_full_at
             new_last_obs_at = None
 
-            # --- >=3: базовые наблюдения (один раз за сессию) ---
-            if message_count >= 3 and portrait_stage < 1:
-                obs = generate_observations(user_id, messages, message_count)
-                if "error" in obs:
-                    log.warning("Basic observations failed for user_id=%s: %s",
-                                user_id, obs.get("error"))
-                else:
-                    save_conversation_log(user_id, conversation_date, obs)
-                    new_stage = max(new_stage, 1)
+            # Определяем что делать — только один шаг за вызов
+            action = None  # "obs_basic" | "obs_full" | "obs_update" | "portrait_preliminary" | "portrait_full"
 
-            # --- >=10: полный анализ (один раз за сессию) ---
-            if message_count >= 10 and portrait_stage < 2:
-                obs_full = generate_observations(user_id, messages, message_count)
-                if "error" in obs_full:
-                    log.warning("Full observations failed for user_id=%s: %s",
-                                user_id, obs_full.get("error"))
-                else:
-                    save_conversation_log(user_id, conversation_date, obs_full)
-                    new_stage = max(new_stage, 2)
-
-            # --- Каждые +5 после 10: обновлённые наблюдения ---
-            if message_count >= 10 and portrait_stage >= 2:
-                # Check if we're at a +5 boundary since stage 2 was set
-                # We track this via a new "last_obs_message_count" in session
-                # For simplicity: run observations at 15, 20, 25... (every 5 msgs from 10)
+            if message_count >= 40:
+                if last_full_at is None or (message_count - last_full_at) >= 20:
+                    action = "portrait_full"
+            elif message_count >= 15 and portrait_stage < 3:
+                action = "portrait_preliminary"
+            elif message_count >= 10 and portrait_stage < 2:
+                action = "obs_full"
+            elif message_count >= 3 and portrait_stage < 1:
+                action = "obs_basic"
+            elif message_count >= 10 and portrait_stage >= 2:
                 last_obs_at = session.get("last_obs_message_count") if session else None
                 if last_obs_at is None:
-                    last_obs_at = 10  # assume last obs was at 10
+                    last_obs_at = 10
                 if (message_count - last_obs_at) >= 5:
-                    obs_update = generate_observations(user_id, messages, message_count)
-                    if "error" not in obs_update:
-                        save_conversation_log(user_id, conversation_date, obs_update)
-                        new_last_obs_at = message_count
-                    else:
-                        new_last_obs_at = last_obs_at
-                else:
-                    new_last_obs_at = last_obs_at
-            else:
-                new_last_obs_at = None
+                    action = "obs_update"
+
+            log.debug("check_portrait_trigger: user_id=%s message_count=%s portrait_stage=%s action=%s",
+                      user_id, message_count, portrait_stage, action)
+
+            if action is None:
+                log.debug("check_portrait_trigger: no action needed for user_id=%s", user_id)
+                return
 
             # Подготовим предыдущий профиль для портретов
             username = get_username(user_id)
@@ -629,8 +636,36 @@ def check_portrait_trigger(user_id: int) -> None:
                 except Exception:
                     log.debug("Failed to load previous profile for user_id=%s", user_id, exc_info=True)
 
-            # --- >=15 и <40: preliminary-портрет (один раз за сессию) ---
-            if 15 <= message_count < 40 and portrait_stage < 3:
+            # Выполняем выбранный action
+            if action == "obs_basic":
+                obs = generate_observations(user_id, messages, message_count)
+                if "error" in obs:
+                    log.warning("Basic observations failed for user_id=%s: %s",
+                                user_id, obs.get("error"))
+                else:
+                    save_conversation_log(user_id, conversation_date, obs)
+                    new_stage = max(new_stage, 1)
+
+            elif action == "obs_full":
+                obs_full = generate_observations(user_id, messages, message_count)
+                if "error" in obs_full:
+                    log.warning("Full observations failed for user_id=%s: %s",
+                                user_id, obs_full.get("error"))
+                else:
+                    save_conversation_log(user_id, conversation_date, obs_full)
+                    new_stage = max(new_stage, 2)
+                    new_last_obs_at = message_count
+
+            elif action == "obs_update":
+                obs_update = generate_observations(user_id, messages, message_count)
+                if "error" in obs_update:
+                    log.warning("Observations update failed for user_id=%s: %s",
+                                user_id, obs_update.get("error"))
+                else:
+                    save_conversation_log(user_id, conversation_date, obs_update)
+                    new_last_obs_at = message_count
+
+            elif action == "portrait_preliminary":
                 portrait_data = generate_portrait(user_id, messages, previous_profile)
                 if "error" in portrait_data:
                     log.warning("Preliminary portrait generation failed for user_id=%s: %s",
@@ -641,16 +676,7 @@ def check_portrait_trigger(user_id: int) -> None:
                     update_user_profile(user_id, portrait_data)
                     new_stage = max(new_stage, 3)
 
-            # --- >=40: full-портрет + обновление каждые +20 сообщений ---
-            should_run_full = False
-            if message_count >= 40:
-                if last_full_at is None:
-                    should_run_full = True
-                else:
-                    if (message_count - last_full_at) >= 20:
-                        should_run_full = True
-
-            if should_run_full:
+            elif action == "portrait_full":
                 full_portrait = generate_portrait(user_id, messages, previous_profile)
                 if "error" in full_portrait:
                     log.warning("Full portrait generation failed for user_id=%s: %s",
