@@ -25,22 +25,31 @@ from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitiz
 
 log = logging.getLogger(__name__)
 
-# Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
+# Pricing from OpenRouter API (2026-03-18). Update periodically via /api/v1/models.
 _MODEL_PRICING_STATIC = {
     "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.5": (3.0, 0.30, 15.0),
+    "anthropic/claude-haiku-4-5-20251001": (1.00, 0.10, 5.00),
+    "anthropic/claude-haiku-4.5": (1.00, 0.10, 5.00),
     "openai/o3": (2.0, 0.50, 8.0),
     "openai/o3-pro": (20.0, 1.0, 80.0),
     "openai/o4-mini": (1.10, 0.275, 4.40),
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
+    "openai/gpt-5": (2.50, 0.25, 15.0),
+    "openai/gpt-5.4": (2.50, 0.25, 15.0),
+    "openai/gpt-5.4-mini": (0.75, 0.075, 4.50),
+    "openai/gpt-5-mini": (0.25, 0.025, 2.00),
     "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
     "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
+    "google/gemini-3.1-pro-preview": (2.0, 0.20, 12.0),
     "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
+    "x-ai/grok-4": (3.0, 0.30, 15.0),
+    "x-ai/grok-3": (3.0, 0.30, 15.0),
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
 }
 
