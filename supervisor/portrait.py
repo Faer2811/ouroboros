@@ -507,6 +507,7 @@ def check_portrait_trigger(user_id: int) -> None:
                 STATE_LOCK_PATH,
                 _load_state_unlocked,
                 _save_state_unlocked,
+                save_session_to_drive,
             )
             import datetime
 
@@ -703,6 +704,7 @@ def check_portrait_trigger(user_id: int) -> None:
                     if new_last_obs_at is not None:
                         sess["last_obs_message_count"] = new_last_obs_at
                     _save_state_unlocked(st)
+                    save_session_to_drive(user_id, sess)
             finally:
                 release_file_lock(STATE_LOCK_PATH, lock_fd)
 

@@ -313,8 +313,8 @@ def update_user_session(user_id: int, message_id: Optional[str] = None, text: Op
                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
                 })
 
-        # Синхронизировать message_count с реальной длиной массива
-        session["message_count"] = len(session.get("messages", []))
+        # Монотонно увеличивать message_count (не сбрасывать до len(messages))
+        session["message_count"] = session.get("message_count", 0) + 1
 
         _save_state_unlocked(st)
         save_session_to_drive(user_id, session)
