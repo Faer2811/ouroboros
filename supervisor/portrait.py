@@ -16,6 +16,8 @@ log = logging.getLogger(__name__)
 
 PORTRAIT_MODEL = "anthropic/claude-sonnet-4-6"
 OBSERVATIONS_MODEL = "anthropic/claude-haiku-4-5-20251001"
+# Strategy: Haiku for observations (cheap, ~$0.01/analysis), Sonnet for portraits (quality)
+# Thresholds: obs at 3, 10, +5 messages; portraits at 15 (preliminary) and 40+ (full)
 
 # ---------------------------------------------------------------------------
 # Knowledge base helpers
@@ -129,18 +131,10 @@ def generate_observations(
 
     conversation_text = "\n\n".join(formatted_messages)
 
-    # Determine analysis level based on message count
-    if message_count < 10:
-        analysis_level = "базовые наблюдения (5-9 сообщений)"
-    else:
-        analysis_level = "расширенные наблюдения (10+ сообщений)"
-
     user_message = (
-        f"Проанализируй разговор с user_id={user_id} ({message_count} сообщений).\n"
-        f"Уровень анализа: {analysis_level}\n\n"
-        f"Верни ТОЛЬКО валидный JSON структуры observations.\n"
-        f"БЕЗ markdown fences, БЕЗ объяснений.\n\n"
-        f"---\n# Разговор\n\n{conversation_text}"
+        f"user_id={user_id}, {message_count} сообщений.\n"
+        f"Верни ТОЛЬКО валидный JSON observations. БЕЗ markdown.\n\n"
+        f"---\n{conversation_text}"
     )
 
     # Build messages with prompt caching
@@ -169,7 +163,7 @@ def generate_observations(
         response_msg, usage = client.chat(
             messages=all_messages,
             model=OBSERVATIONS_MODEL,
-            max_tokens=2000,
+            max_tokens=1000,
             reasoning_effort="none",
         )
         raw_content = response_msg.get("content") or ""
