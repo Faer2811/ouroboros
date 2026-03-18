@@ -233,11 +233,31 @@ def get_user_session(user_id: int) -> Optional[Dict[str, Any]]:
 
 
 def start_user_session(user_id: int) -> None:
-    """Начать новую сессию для пользователя."""
+    """Начать новую сессию для пользователя (или восстановить существующую)."""
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
         st = _load_state_unlocked()
         sessions = st.setdefault("user_sessions", {})
+        existing = sessions.get(str(user_id))
+
+        # If there's already a session with messages — don't overwrite it
+        # Just touch last_message_at to show activity
+        if existing and existing.get("messages"):
+            existing["last_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            _save_state_unlocked(st)
+            return
+
+        # Check Drive file for existing session (recovery after restart)
+        drive_session = json_load_file(_session_file_path(user_id))
+        if drive_session and drive_session.get("messages"):
+            sessions[str(user_id)] = drive_session
+            drive_session["last_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            _save_state_unlocked(st)
+            log.info("Restored existing session from Drive for user %s (%d messages)",
+                     user_id, len(drive_session.get("messages", [])))
+            return
+
+        # Fresh session
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         sessions[str(user_id)] = {
             "user_id": user_id,
@@ -489,6 +509,17 @@ def init_state() -> Dict[str, Any]:
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
         st = _load_state_unlocked()
+
+        # Restore sessions from Drive (ground truth after restart)
+        drive_sessions = load_sessions_from_drive()
+        if drive_sessions:
+            existing_sessions = st.setdefault("user_sessions", {})
+            for uid_str, session in drive_sessions.items():
+                existing = existing_sessions.get(uid_str)
+                # Merge: use Drive version if it has more messages or doesn't exist in state
+                if existing is None or len(session.get("messages", [])) >= len(existing.get("messages", [])):
+                    existing_sessions[uid_str] = session
+            log.info("Merged %d session(s) from Drive into state", len(drive_sessions))
 
         # Capture session snapshots for drift detection
         st["session_spent_snapshot"] = float(st.get("spent_usd") or 0.0)
