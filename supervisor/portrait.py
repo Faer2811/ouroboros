@@ -14,8 +14,8 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
-PORTRAIT_MODEL = "anthropic/claude-haiku-4-5"
-OBSERVATIONS_MODEL = "anthropic/claude-sonnet-4-6"
+PORTRAIT_MODEL = "anthropic/claude-sonnet-4-6"
+OBSERVATIONS_MODEL = "anthropic/claude-haiku-4-5-20251001"
 
 # ---------------------------------------------------------------------------
 # Knowledge base helpers
@@ -487,11 +487,12 @@ def check_portrait_trigger(user_id: int) -> None:
     Запускает анализ по порогам количества сообщений в отдельном потоке.
 
     Пороги:
-      - <5 сообщений: ничего не делаем
-      - >=5: базовые наблюдения (generate_observations, один раз за сессию)
-      - >=10: полный анализ разговора (generate_observations, один раз за сессию)
-      - >=15: preliminary-портрет (generate_portrait, один раз за сессию)
-      - >=40: full-портрет, затем обновление каждые +20 сообщений
+      - <3 сообщений: ничего не делаем
+      - >=3: базовые наблюдения (generate_observations на Haiku, один раз за сессию)
+      - >=10: полный анализ разговора (generate_observations на Haiku, один раз за сессию)
+      - >=15: preliminary-портрет (generate_portrait на Sonnet, один раз за сессию)
+      - >=40: full-портрет на Sonnet, затем обновление каждые +20 сообщений
+      Далее: +5 от предыдущего порога для наблюдений
     """
     import threading
 
@@ -559,8 +560,8 @@ def check_portrait_trigger(user_id: int) -> None:
                 portrait_stage = 0
                 last_full_at = None
 
-            if message_count < 5:
-                log.debug("check_portrait_trigger: message_count=%s < 5, skipping", message_count)
+            if message_count < 3:
+                log.debug("check_portrait_trigger: message_count=%s < 3, skipping", message_count)
                 return
 
             # Дата разговора по последнему сообщению (общая для всех сохранений)
@@ -576,9 +577,10 @@ def check_portrait_trigger(user_id: int) -> None:
 
             new_stage = portrait_stage
             new_last_full_at = last_full_at
+            new_last_obs_at = None
 
-            # --- >=5: базовые наблюдения (один раз за сессию) ---
-            if message_count >= 5 and portrait_stage < 1:
+            # --- >=3: базовые наблюдения (один раз за сессию) ---
+            if message_count >= 3 and portrait_stage < 1:
                 obs = generate_observations(user_id, messages, message_count)
                 if "error" in obs:
                     log.warning("Basic observations failed for user_id=%s: %s",
@@ -596,6 +598,26 @@ def check_portrait_trigger(user_id: int) -> None:
                 else:
                     save_conversation_log(user_id, conversation_date, obs_full)
                     new_stage = max(new_stage, 2)
+
+            # --- Каждые +5 после 10: обновлённые наблюдения ---
+            if message_count >= 10 and portrait_stage >= 2:
+                # Check if we're at a +5 boundary since stage 2 was set
+                # We track this via a new "last_obs_message_count" in session
+                # For simplicity: run observations at 15, 20, 25... (every 5 msgs from 10)
+                last_obs_at = session.get("last_obs_message_count") if session else None
+                if last_obs_at is None:
+                    last_obs_at = 10  # assume last obs was at 10
+                if (message_count - last_obs_at) >= 5:
+                    obs_update = generate_observations(user_id, messages, message_count)
+                    if "error" not in obs_update:
+                        save_conversation_log(user_id, conversation_date, obs_update)
+                        new_last_obs_at = message_count
+                    else:
+                        new_last_obs_at = last_obs_at
+                else:
+                    new_last_obs_at = last_obs_at
+            else:
+                new_last_obs_at = None
 
             # Подготовим предыдущий профиль для портретов
             username = get_username(user_id)
@@ -652,6 +674,8 @@ def check_portrait_trigger(user_id: int) -> None:
                         sess["portrait_stage"] = new_stage
                     if new_last_full_at is not None:
                         sess["last_full_portrait_message_count"] = new_last_full_at
+                    if new_last_obs_at is not None:
+                        sess["last_obs_message_count"] = new_last_obs_at
                     _save_state_unlocked(st)
             finally:
                 release_file_lock(STATE_LOCK_PATH, lock_fd)
