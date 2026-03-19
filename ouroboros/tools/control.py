@@ -43,6 +43,9 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
 
 
 def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent_task_id: str = "") -> str:
+    # Scheduled tasks disabled — only explicit user requests allowed
+    if not parent_task_id:
+        return "schedule_task is disabled. Work only on explicit user requests."
     current_depth = getattr(ctx, 'task_depth', 0)
     new_depth = current_depth + 1 if parent_task_id else 0
     if new_depth > MAX_SUBTASK_DEPTH:
