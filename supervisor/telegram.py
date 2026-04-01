@@ -16,7 +16,7 @@ import requests
 
 from supervisor.state import load_state, save_state, append_jsonl, \
     get_user_session, start_user_session, update_user_session, end_user_session
-from supervisor.portrait import check_portrait_trigger
+# from supervisor.portrait import check_portrait_trigger  # disabled
 
 log = logging.getLogger(__name__)
 
@@ -545,7 +545,7 @@ def handle_incoming_message(raw_msg: Dict[str, Any]) -> Dict[str, Any]:
     update_user_session(user_id, message_id, text_raw)
 
     # Check portrait trigger (runs in background if >= 3 messages)
-    check_portrait_trigger(user_id)
+    # check_portrait_trigger(user_id)  # disabled
 
     return {
         "chat_id": chat_id,
